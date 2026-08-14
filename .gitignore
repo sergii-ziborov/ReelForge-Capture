@@ -1,0 +1,15 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.mp4
+*.webm
+*.mov
+*.mkv
+*.wav
+*.mp3
+/sessions/

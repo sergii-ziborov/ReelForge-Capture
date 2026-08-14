@@ -1,0 +1,28 @@
+[package]
+name = "reelforge-capture-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "CLI for ReelForge Capture"
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "reelforge-capture"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+reelforge-capture-core = { workspace = true }
+reelforge-capture-edit = { workspace = true }
+reelforge-capture-platform = { workspace = true }
+reelforge-capture-project = { workspace = true }
+reelforge-capture-store = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

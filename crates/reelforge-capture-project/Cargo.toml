@@ -1,0 +1,22 @@
+[package]
+name = "reelforge-capture-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Headless CaptureProject JSON authoring for ReelForge"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+reelforge-capture-core = { workspace = true }
+reelforge-capture-edit = { workspace = true }
+reelforge-capture-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

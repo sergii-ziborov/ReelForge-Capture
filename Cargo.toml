@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "crates/reelforge-capture-cli",
+    "crates/reelforge-capture-core",
+    "crates/reelforge-capture-edit",
+    "crates/reelforge-capture-platform",
+    "crates/reelforge-capture-project",
+    "crates/reelforge-capture-store",
+]
+resolver = "3"
+default-members = ["crates/reelforge-capture-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sergii-ziborov/ReelForge-Capture"
+homepage = "https://github.com/sergii-ziborov/ReelForge-Capture"
+rust-version = "1.97"
+authors = ["Sergii Ziborov"]
+description = "Windows screen capture and headless CaptureProject editor for ReelForge"
+keywords = ["capture", "screen", "video", "nle", "windows"]
+categories = ["multimedia", "command-line-utilities"]
+
+[workspace.dependencies]
+reelforge-capture-core = { path = "crates/reelforge-capture-core", version = "0.1.0" }
+reelforge-capture-edit = { path = "crates/reelforge-capture-edit", version = "0.1.0" }
+reelforge-capture-platform = { path = "crates/reelforge-capture-platform", version = "0.1.0" }
+reelforge-capture-project = { path = "crates/reelforge-capture-project", version = "0.1.0" }
+reelforge-capture-store = { path = "crates/reelforge-capture-store", version = "0.1.0" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

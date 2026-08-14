@@ -1,0 +1,20 @@
+[package]
+name = "reelforge-capture-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Segmented crash-safe capture session store"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+reelforge-capture-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
