@@ -32,7 +32,7 @@ impl Region {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VideoSource {
-    /// Full virtual desktop (`gdigrab` `desktop`).
+    /// Full desktop / session display (`gdigrab` / `avfoundation` / `x11grab`).
     Screen,
     /// Window whose title contains `title`.
     Window {
@@ -46,27 +46,50 @@ pub enum VideoSource {
     },
 }
 
-/// Named WASAPI / `DirectShow` device.
+/// Named host audio device (backend filled at grab if empty).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioDevice {
-    /// ffmpeg device name (as listed by `-list_devices`).
+    /// ffmpeg device name or index (as listed by the host backend).
     pub name: String,
-    /// `dshow` or `wasapi`.
-    #[serde(default = "default_audio_backend")]
+    /// `dshow` / `wasapi` / `avfoundation` / `pulse` / `alsa`. Empty → host default.
+    #[serde(default)]
     pub backend: String,
 }
 
-fn default_audio_backend() -> String {
-    "dshow".into()
-}
-
 impl AudioDevice {
-    /// `dshow` device.
+    /// Device name; backend chosen for the host OS at grab time.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            backend: String::new(),
+        }
+    }
+
+    /// `dshow` device (Windows).
     #[must_use]
     pub fn dshow(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             backend: "dshow".into(),
+        }
+    }
+
+    /// `avfoundation` device (macOS).
+    #[must_use]
+    pub fn avfoundation(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            backend: "avfoundation".into(),
+        }
+    }
+
+    /// Pulse / PipeWire-Pulse source (Linux).
+    #[must_use]
+    pub fn pulse(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            backend: "pulse".into(),
         }
     }
 }

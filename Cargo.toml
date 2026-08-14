@@ -18,7 +18,7 @@ repository = "https://github.com/sergii-ziborov/ReelForge-Capture"
 homepage = "https://github.com/sergii-ziborov/ReelForge-Capture"
 rust-version = "1.97"
 authors = ["Sergii Ziborov"]
-description = "Windows screen capture and headless CaptureProject editor for ReelForge"
+description = "Cross-platform screen capture and headless CaptureProject editor for ReelForge"
 keywords = ["capture", "screen", "video", "nle", "windows"]
 categories = ["multimedia", "command-line-utilities"]
 

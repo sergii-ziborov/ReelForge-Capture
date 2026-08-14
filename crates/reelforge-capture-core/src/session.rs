@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Which audio legs to open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AudioMix {
-    /// WASAPI / dshow loopback (system output).
+    /// Loopback / monitor (system output).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<AudioDevice>,
     /// Microphone.
@@ -24,7 +24,7 @@ pub struct CaptureSpec {
     /// Audio legs.
     #[serde(default)]
     pub audio: AudioMix,
-    /// Frames per second for gdigrab.
+    /// Frames per second for the host grabber.
     #[serde(default = "default_fps")]
     pub fps: f64,
     /// Closed-segment length in seconds.

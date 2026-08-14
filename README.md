@@ -1,12 +1,12 @@
 # ReelForge Capture
 
-Windows **screen / window / region** capture with system + mic audio, cursor and click metadata, crash-safe segments, and a **headless CaptureProject** that compiles into [ReelForge](https://github.com/sergii-ziborov/ReelForge).
+**Screen / window / region** capture on **Windows, macOS, and Linux**, with system + mic audio, cursor and click metadata, crash-safe segments, and a **headless CaptureProject** that compiles into [ReelForge](https://github.com/sergii-ziborov/ReelForge).
 
 This is the capture + edit product — not a desktop Premiere clone with a full GUI, and not a vision stack.
 
 ```text
-Windows display / window / region
-        + system audio + microphone
+display / window / region     Windows gdigrab · macOS avfoundation · Linux x11grab
+        + system audio + microphone     dshow/wasapi · avfoundation · pulse
         + cursor / click log
         ↓
 segmented session store   ← crash-safe WAL + closed segments
@@ -29,8 +29,8 @@ Capture never queries subjects and never embeds a SightLoom crate. Semantic blur
 
 ## What v0.1 does
 
-- **Video source:** full desktop, window title, or pixel region (`gdigrab` via host ffmpeg)
-- **Audio:** system loopback and/or microphone (`dshow` / `wasapi` device names)
+- **Video source:** full desktop, window title / id, or pixel region (host ffmpeg grabber)
+- **Audio:** system loopback and/or microphone (host device names)
 - **Pointer:** cursor samples + click events (JSONL sidecar)
 - **Store:** `sessions/<id>/` with `manifest.json`, `wal.jsonl`, closed `segments/`, append-only `events.jsonl`
 - **Headless project:** emit a ReelForge `CaptureProject` JSON (no GUI)
@@ -40,7 +40,9 @@ Capture never queries subjects and never embeds a SightLoom crate. Semantic blur
 
 - Rust **1.97+** (`rust-toolchain.toml`)
 - Host **ffmpeg** / **ffprobe** on `PATH` for live grab and encode
-- Windows for real display capture (store / edit / project are OS-agnostic)
+- **Windows:** `gdigrab` + `dshow` / `wasapi` (window title, desktop, region)
+- **macOS:** `avfoundation` (screen index via `REELFORGE_CAPTURE_SCREEN`, default `1`; region = crop; window = device name). System loopback needs a virtual device (e.g. BlackHole). Screen Recording permission required.
+- **Linux:** `x11grab` + Pulse (`pactl` listing). `DISPLAY` defaults to `:0.0`. Window can be a title or an X id (`0x…`). Wayland works when a Pulse/PipeWire monitor exists; grab is X11/`x11grab` unless you pass another backend.
 
 ## Build
 
@@ -103,7 +105,7 @@ A crash mid-segment leaves the WAL + closed segments. Recovery drops the unfinis
 | --- | --- |
 | `reelforge-capture-core` | Time, sources, pointer events, session spec |
 | `reelforge-capture-store` | Segmented layout, WAL, event log |
-| `reelforge-capture-platform` | ffmpeg grab args, device list, pointer poll |
+| `reelforge-capture-platform` | Host grab args (`gdigrab` / `avfoundation` / `x11grab`), device list |
 | `reelforge-capture-edit` | Range EDL, idle, click-zoom |
 | `reelforge-capture-project` | Headless CaptureProject JSON |
 | `reelforge-capture-cli` | `reelforge-capture` binary |

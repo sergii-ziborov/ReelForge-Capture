@@ -1,4 +1,4 @@
-//! `reelforge-capture` — headless Windows capture + `CaptureProject`.
+//! `reelforge-capture` — headless screen capture + `CaptureProject`.
 #![allow(
     missing_docs,
     clippy::print_stdout,
@@ -22,7 +22,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "reelforge-capture", about = "ReelForge Capture (headless)")]
+#[command(
+    name = "reelforge-capture",
+    about = "ReelForge Capture (headless, Windows / macOS / Linux)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -49,10 +52,10 @@ enum Cmd {
         /// Region `x,y,w,h`.
         #[arg(long)]
         region: Option<String>,
-        /// Enable microphone (dshow name).
+        /// Microphone (host name / index: dshow, avfoundation, pulse).
         #[arg(long)]
         mic: Option<String>,
-        /// Enable system loopback (dshow name).
+        /// System loopback / monitor (host device name).
         #[arg(long)]
         system_audio: Option<String>,
         /// Closed segment length.
@@ -180,7 +183,7 @@ fn devices() -> Result<()> {
     }
     let audio = list_audio_hint()?;
     if audio.raw.is_empty() {
-        println!("audio\t(ffmpeg dshow list unavailable)");
+        println!("audio\t(host audio list unavailable)");
     } else {
         print!("{}", audio.raw);
     }
@@ -204,8 +207,8 @@ fn start(
     spec.video = video;
     spec.segment_secs = segment_secs;
     spec.audio = AudioMix {
-        system: system_audio.map(AudioDevice::dshow),
-        microphone: mic.map(AudioDevice::dshow),
+        system: system_audio.map(AudioDevice::named),
+        microphone: mic.map(AudioDevice::named),
     };
     let meta = SessionMeta {
         id: SessionId::new(id),
