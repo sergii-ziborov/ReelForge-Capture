@@ -1,5 +1,5 @@
 [package]
-name = "reelforge-capture-project"
+name = "reelforge-capture-schema"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,15 +7,14 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Headless CaptureProject JSON authoring for ReelForge"
+description = "CaptureProject v1 wire contract shared with ReelForge"
 keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
 reelforge-capture-core = { workspace = true }
-reelforge-capture-edit = { workspace = true }
-reelforge-capture-schema = { workspace = true }
-reelforge-capture-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

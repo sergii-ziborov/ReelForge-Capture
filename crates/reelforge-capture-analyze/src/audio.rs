@@ -1,0 +1,132 @@
+//! Demux each configured audio leg into its own file.
+
+use reelforge_capture_core::{AudioLeg, MediaTime, Result, SegmentId};
+use reelforge_capture_platform::{extract_audio_stream, probe_duration};
+use reelforge_capture_store::{
+    AudioLegTrack, AudioSegmentFile, AudioSidecar, SegmentRecord, SessionStore,
+};
+use std::fs;
+
+/// Container for demuxed legs. Capture always encodes AAC, so an MP4 audio
+/// container takes the copied stream without a re-encode.
+const AUDIO_EXT: &str = "m4a";
+
+/// Outcome of [`materialize_audio`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioMaterialization {
+    /// Files that now exist, ready to be referenced by a project.
+    pub sidecar: AudioSidecar,
+    /// Segments demuxed during this call.
+    pub extracted: usize,
+    /// Segments already on disk from an earlier call.
+    pub reused: usize,
+    /// Segments that could not be demuxed (host ffmpeg said why).
+    pub failures: Vec<String>,
+}
+
+/// Demux every configured audio leg of every committed segment.
+///
+/// Writes `audio/<leg>/<segment>.m4a` plus `audio.json`, and returns what
+/// happened. Already-extracted files are kept (committed segments are
+/// immutable), so calling this twice is cheap.
+///
+/// A leg that fails for one segment keeps its other segments: the sidecar
+/// then describes a real hole instead of pretending the audio is continuous.
+///
+/// # Errors
+///
+/// Session I/O (creating the audio directories, writing the sidecar).
+pub fn materialize_audio(store: &SessionStore) -> Result<AudioMaterialization> {
+    let mix = store.manifest().meta.spec.audio.clone();
+    let segments = store.manifest().segments.clone();
+    let mut out = AudioMaterialization {
+        sidecar: AudioSidecar::new(),
+        extracted: 0,
+        reused: 0,
+        failures: Vec::new(),
+    };
+
+    for (leg, device) in mix.configured() {
+        let Some(audio_index) = mix.audio_index(leg) else {
+            continue;
+        };
+        fs::create_dir_all(store.root().join("audio").join(leg.as_str()))?;
+        let mut track = AudioLegTrack {
+            leg,
+            device: device.name.clone(),
+            audio_index,
+            files: Vec::new(),
+        };
+        for seg in &segments {
+            match demux_segment(store, seg, leg, audio_index) {
+                Ok((file, reused)) => {
+                    if reused {
+                        out.reused += 1;
+                    } else {
+                        out.extracted += 1;
+                    }
+                    track.files.push(file);
+                }
+                Err(e) => out.failures.push(e.to_string()),
+            }
+        }
+        out.sidecar.legs.push(track);
+    }
+
+    store.write_audio_sidecar(&out.sidecar)?;
+    Ok(out)
+}
+
+/// Relative path of one leg's file for one segment.
+#[must_use]
+pub fn audio_rel_path(leg: AudioLeg, segment: SegmentId) -> String {
+    format!("audio/{}/{}.{AUDIO_EXT}", leg.as_str(), segment.file_stem())
+}
+
+fn demux_segment(
+    store: &SessionStore,
+    seg: &SegmentRecord,
+    leg: AudioLeg,
+    audio_index: u32,
+) -> Result<(AudioSegmentFile, bool)> {
+    let rel = audio_rel_path(leg, seg.id);
+    let dst = store.root().join(&rel);
+    let reused = fs::metadata(&dst).is_ok_and(|m| m.len() > 0);
+    if !reused {
+        extract_audio_stream(store.root().join(&seg.path), audio_index, &dst)?;
+    }
+    let duration = probe_duration(&dst).ok().flatten();
+    let scale = seg.start.timescale.max(1);
+    let gap = duration.map(|d| MediaTime {
+        ticks: d.ticks - (seg.end.ticks - seg.start.ticks),
+        timescale: scale,
+    });
+    Ok((
+        AudioSegmentFile {
+            segment: seg.id,
+            path: rel,
+            start: seg.start,
+            end: seg.end,
+            duration,
+            gap,
+        },
+        reused,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leg_paths_are_stable_and_padded() {
+        assert_eq!(
+            audio_rel_path(AudioLeg::System, SegmentId(7)),
+            "audio/system/000007.m4a"
+        );
+        assert_eq!(
+            audio_rel_path(AudioLeg::Microphone, SegmentId(1)),
+            "audio/microphone/000001.m4a"
+        );
+    }
+}

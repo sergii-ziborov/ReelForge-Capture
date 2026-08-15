@@ -1,6 +1,6 @@
 //! Trim / remove / speed on the session clock.
 
-use reelforge_capture_core::{CaptureError, HZ_1K, MediaRange, MediaTime, Result};
+use reelforge_capture_core::{CaptureError, MediaRange, MediaTime, Result};
 use serde::{Deserialize, Serialize};
 
 /// One editorial decision.
@@ -83,18 +83,64 @@ pub fn apply_ranges(duration: MediaTime, list: &EditList) -> Result<Vec<KeptRang
 
     let mut out = Vec::new();
     for k in keep {
-        let factor = speeds
+        out.extend(split_by_speed(k, &speeds)?);
+    }
+    Ok(merge_same_speed(out))
+}
+
+/// Split one keep so a partial speed overlap does not retag the whole range.
+fn split_by_speed(keep: MediaRange, speeds: &[(MediaRange, f64)]) -> Result<Vec<KeptRange>> {
+    let mut cuts = vec![keep.start.ticks, keep.end.ticks];
+    for (r, _) in speeds {
+        if !ranges_overlap(*r, keep) {
+            continue;
+        }
+        cuts.push(r.start.ticks.clamp(keep.start.ticks, keep.end.ticks));
+        cuts.push(r.end.ticks.clamp(keep.start.ticks, keep.end.ticks));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let scale = keep.start.timescale;
+    let mut out = Vec::new();
+    for w in cuts.windows(2) {
+        if w[1] <= w[0] {
+            continue;
+        }
+        let source = MediaRange::new(
+            MediaTime {
+                ticks: w[0],
+                timescale: scale,
+            },
+            MediaTime {
+                ticks: w[1],
+                timescale: scale,
+            },
+        )?;
+        // Last speed that fully covers this atom wins (ops apply in order).
+        let speed = speeds
             .iter()
             .rev()
-            .find(|(r, _)| ranges_overlap(*r, k))
+            .find(|(r, _)| r.start.ticks <= w[0] && r.end.ticks >= w[1])
             .map_or(1.0, |(_, f)| *f);
-        out.push(KeptRange {
-            source: k,
-            speed: factor,
-        });
+        out.push(KeptRange { source, speed });
     }
-    let _ = HZ_1K;
     Ok(out)
+}
+
+fn merge_same_speed(ranges: Vec<KeptRange>) -> Vec<KeptRange> {
+    let mut out: Vec<KeptRange> = Vec::new();
+    for r in ranges {
+        if let Some(last) = out.last_mut()
+            && (last.speed - r.speed).abs() < 1e-9
+            && last.source.end.ticks == r.source.start.ticks
+            && last.source.end.timescale == r.source.start.timescale
+        {
+            last.source.end = r.source.end;
+            continue;
+        }
+        out.push(r);
+    }
+    out
 }
 
 fn ranges_overlap(a: MediaRange, b: MediaRange) -> bool {
@@ -149,6 +195,7 @@ fn subtract(keep: MediaRange, cut: MediaRange) -> Result<Vec<MediaRange>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reelforge_capture_core::HZ_1K;
 
     fn t(s: f64) -> MediaTime {
         MediaTime::from_secs(s, HZ_1K).unwrap()
@@ -173,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn speed_tags_keep() {
+    fn speed_splits_partial_overlap() {
         let mut list = EditList::default();
         list.ops.push(EditDecision::Speed {
             start: t(0.0),
@@ -181,7 +228,29 @@ mod tests {
             factor: 2.0,
         });
         let kept = apply_ranges(t(5.0), &list).unwrap();
-        assert_eq!(kept.len(), 1);
+        assert_eq!(kept.len(), 2);
+        assert!((kept[0].source.start.as_secs() - 0.0).abs() < 1e-9);
+        assert!((kept[0].source.end.as_secs() - 2.0).abs() < 1e-9);
         assert!((kept[0].speed - 2.0).abs() < 1e-9);
+        assert!((kept[1].source.start.as_secs() - 2.0).abs() < 1e-9);
+        assert!((kept[1].source.end.as_secs() - 5.0).abs() < 1e-9);
+        assert!((kept[1].speed - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn speed_inside_keep_splits_three_ways() {
+        let mut list = EditList::default();
+        list.ops.push(EditDecision::Speed {
+            start: t(3.0),
+            end: t(7.0),
+            factor: 2.0,
+        });
+        let kept = apply_ranges(t(10.0), &list).unwrap();
+        assert_eq!(kept.len(), 3);
+        assert!((kept[0].speed - 1.0).abs() < 1e-9);
+        assert!((kept[1].speed - 2.0).abs() < 1e-9);
+        assert!((kept[1].source.start.as_secs() - 3.0).abs() < 1e-9);
+        assert!((kept[1].source.end.as_secs() - 7.0).abs() < 1e-9);
+        assert!((kept[2].speed - 1.0).abs() < 1e-9);
     }
 }

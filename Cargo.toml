@@ -1,10 +1,13 @@
 [workspace]
 members = [
+    "crates/reelforge-capture-analyze",
     "crates/reelforge-capture-cli",
     "crates/reelforge-capture-core",
     "crates/reelforge-capture-edit",
     "crates/reelforge-capture-platform",
     "crates/reelforge-capture-project",
+    "crates/reelforge-capture-runtime",
+    "crates/reelforge-capture-schema",
     "crates/reelforge-capture-store",
 ]
 resolver = "3"
@@ -23,10 +26,13 @@ keywords = ["capture", "screen", "video", "nle", "windows"]
 categories = ["multimedia", "command-line-utilities"]
 
 [workspace.dependencies]
+reelforge-capture-analyze = { path = "crates/reelforge-capture-analyze", version = "0.1.0" }
 reelforge-capture-core = { path = "crates/reelforge-capture-core", version = "0.1.0" }
 reelforge-capture-edit = { path = "crates/reelforge-capture-edit", version = "0.1.0" }
 reelforge-capture-platform = { path = "crates/reelforge-capture-platform", version = "0.1.0" }
 reelforge-capture-project = { path = "crates/reelforge-capture-project", version = "0.1.0" }
+reelforge-capture-runtime = { path = "crates/reelforge-capture-runtime", version = "0.1.0" }
+reelforge-capture-schema = { path = "crates/reelforge-capture-schema", version = "0.1.0" }
 reelforge-capture-store = { path = "crates/reelforge-capture-store", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -17,10 +17,13 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+ctrlc = "3.4"
+reelforge-capture-analyze = { workspace = true }
 reelforge-capture-core = { workspace = true }
 reelforge-capture-edit = { workspace = true }
 reelforge-capture-platform = { workspace = true }
 reelforge-capture-project = { workspace = true }
+reelforge-capture-runtime = { workspace = true }
 reelforge-capture-store = { workspace = true }
 serde_json = { workspace = true }
 

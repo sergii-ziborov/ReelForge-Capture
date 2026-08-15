@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "id": "ses_golden",
+  "name": "golden",
+  "sequences": [
+    {
+      "id": "main",
+      "name": "main",
+      "tracks": [
+        {
+          "id": "v0",
+          "kind": "video",
+          "items": [
+            {
+              "kind": "clip",
+              "id": "c0",
+              "media": "seg_000001",
+              "source": {
+                "start": {
+                  "ticks": 0,
+                  "timescale": 1000
+                },
+                "duration": {
+                  "ticks": 2000,
+                  "timescale": 1000
+                }
+              },
+              "retiming": {
+                "mode": "identity"
+              },
+              "metadata": {}
+            },
+            {
+              "kind": "clip",
+              "id": "c1",
+              "media": "seg_000001",
+              "source": {
+                "start": {
+                  "ticks": 2000,
+                  "timescale": 1000
+                },
+                "duration": {
+                  "ticks": 3000,
+                  "timescale": 1000
+                }
+              },
+              "retiming": {
+                "mode": "speed",
+                "factor": 2.0
+              },
+              "transition_in": {
+                "kind": "dissolve",
+                "duration": {
+                  "ticks": 250,
+                  "timescale": 1000
+                }
+              },
+              "metadata": {
+                "tags": {
+                  "origin": "speed_op"
+                }
+              }
+            },
+            {
+              "kind": "gap",
+              "duration": {
+                "ticks": 500,
+                "timescale": 1000
+              }
+            },
+            {
+              "kind": "nested",
+              "sequence": "insert",
+              "duration": {
+                "ticks": 1000,
+                "timescale": 1000
+              }
+            }
+          ],
+          "muted": false
+        },
+        {
+          "id": "a_system",
+          "kind": "audio",
+          "items": [
+            {
+              "kind": "clip",
+              "id": "as0",
+              "media": "system_000001",
+              "source": {
+                "start": {
+                  "ticks": 0,
+                  "timescale": 1000
+                },
+                "duration": {
+                  "ticks": 5000,
+                  "timescale": 1000
+                }
+              },
+              "retiming": {
+                "mode": "identity"
+              },
+              "metadata": {
+                "tags": {
+                  "audio_leg": "system",
+                  "gap_ms": "12"
+                }
+              }
+            }
+          ],
+          "muted": false
+        }
+      ],
+      "markers": [
+        {
+          "t": {
+            "ticks": 1000,
+            "timescale": 1000
+          },
+          "duration": {
+            "ticks": 400,
+            "timescale": 1000
+          },
+          "name": "click_zoom_0",
+          "semantic": {
+            "kind": "event",
+            "id": "click:100,80"
+          }
+        }
+      ],
+      "canvas": [
+        1920,
+        1080
+      ]
+    },
+    {
+      "id": "insert",
+      "name": "insert",
+      "tracks": [
+        {
+          "id": "v0",
+          "kind": "video",
+          "items": [],
+          "muted": true
+        }
+      ],
+      "markers": []
+    }
+  ],
+  "active_sequence": "main",
+  "media": [
+    {
+      "id": "seg_000001",
+      "uri": "sessions/ses_golden/segments/000001.mkv",
+      "duration": {
+        "ticks": 5000,
+        "timescale": 1000
+      },
+      "role": "video"
+    },
+    {
+      "id": "system_000001",
+      "uri": "sessions/ses_golden/audio/system/000001.m4a",
+      "duration": {
+        "ticks": 5000,
+        "timescale": 1000
+      },
+      "role": "audio"
+    }
+  ],
+  "markers": [
+    {
+      "t": {
+        "ticks": 0,
+        "timescale": 1000
+      },
+      "name": "project_marker"
+    }
+  ],
+  "metadata": {
+    "tags": {
+      "producer": "reelforge-capture"
+    }
+  },
+  "semantic": [
+    {
+      "kind": "query",
+      "id": "q_1"
+    }
+  ]
+}

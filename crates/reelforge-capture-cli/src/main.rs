@@ -11,20 +11,29 @@ mod io;
 
 use clap::{Parser, Subcommand};
 use io::{click_zoom_path, load_edits, parse_video, save_edits, spec_name};
+use reelforge_capture_analyze::{SignalOptions, materialize_audio, session_signals};
 use reelforge_capture_core::{
-    AudioDevice, AudioMix, CaptureSpec, HZ_1K, MediaTime, Result, SessionId, SessionMeta,
+    AudioDevice, AudioMix, CaptureError, CaptureSpec, HZ_1K, MediaTime, Result, SessionId,
+    SessionMeta,
 };
-use reelforge_capture_edit::{EditDecision, apply_ranges, detect_idle, zoom_from_clicks};
+use reelforge_capture_edit::{
+    EditDecision, IdleConfig, apply_ranges, detect_idle_multi, zoom_from_clicks,
+};
 use reelforge_capture_platform::{grab_command, list_audio_hint, list_windows};
-use reelforge_capture_project::{project_from_session, to_json_pretty};
+use reelforge_capture_project::{project_from_session, to_json_pretty, unresolved_audio};
+use reelforge_capture_runtime::{SessionPhase, SessionSupervisor};
 use reelforge_capture_store::SessionStore;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
     name = "reelforge-capture",
-    about = "ReelForge Capture (headless, Windows / macOS / Linux)"
+    about = "ReelForge Capture — experimental host-ffmpeg recorder (Windows is the supported grab path)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -61,9 +70,12 @@ enum Cmd {
         /// Closed segment length.
         #[arg(long, default_value_t = 5.0)]
         segment_secs: f64,
-        /// Spawn ffmpeg instead of printing the command.
+        /// Supervise the grab (own the process, commit closed segments) until Ctrl+C.
         #[arg(long)]
         run: bool,
+        /// With `--run`, stop after N seconds.
+        #[arg(long)]
+        for_secs: Option<f64>,
     },
     /// Range edits.
     Edit {
@@ -72,7 +84,12 @@ enum Cmd {
         #[command(subcommand)]
         op: EditCmd,
     },
-    /// Detect idle ranges; `--remove` appends remove ops.
+    /// Demux each audio leg into its own file (`audio/<leg>/…` + `audio.json`).
+    Audio {
+        /// Session directory.
+        session: PathBuf,
+    },
+    /// Detect idle ranges from pointer + frame difference + audio energy.
     Idle {
         /// Session directory.
         session: PathBuf,
@@ -82,6 +99,21 @@ enum Cmd {
         /// Append remove decisions for idle ranges.
         #[arg(long)]
         remove: bool,
+        /// Do not measure frame difference.
+        #[arg(long)]
+        no_motion: bool,
+        /// Do not measure audio energy.
+        #[arg(long)]
+        no_audio: bool,
+        /// Frame-difference samples per second.
+        #[arg(long, default_value_t = 2.0)]
+        sample_fps: f64,
+        /// Frame difference above this counts as picture activity.
+        #[arg(long, default_value_t = 1.0)]
+        motion_above: f64,
+        /// Audio RMS (dBFS) above this counts as sound activity.
+        #[arg(long, default_value_t = -45.0, allow_hyphen_values = true)]
+        audio_above_db: f64,
     },
     /// Write click-zoom hints into edits.json.
     ZoomClicks {
@@ -101,6 +133,9 @@ enum Cmd {
         /// Output path.
         #[arg(short, long)]
         output: PathBuf,
+        /// Do not demux audio legs first (audio tracks stay muted / flagged).
+        #[arg(long)]
+        no_audio_extract: bool,
     },
 }
 
@@ -151,6 +186,7 @@ fn run(cli: Cli) -> Result<()> {
             system_audio,
             segment_secs,
             run,
+            for_secs,
         } => start(
             dir,
             id,
@@ -161,19 +197,44 @@ fn run(cli: Cli) -> Result<()> {
             system_audio,
             segment_secs,
             run,
+            for_secs,
         ),
         Cmd::Edit { session, op } => edit(&session, op),
+        Cmd::Audio { session } => audio(&session),
         Cmd::Idle {
             session,
             threshold,
             remove,
-        } => idle(&session, threshold, remove),
+            no_motion,
+            no_audio,
+            sample_fps,
+            motion_above,
+            audio_above_db,
+        } => idle(
+            &session,
+            remove,
+            IdleConfig {
+                threshold: MediaTime::from_secs(threshold, HZ_1K)?,
+                motion_above,
+                audio_above_db,
+            },
+            SignalOptions {
+                motion: !no_motion,
+                audio: !no_audio,
+                sample_fps,
+                ..SignalOptions::default()
+            },
+        ),
         Cmd::ZoomClicks {
             session,
             duration,
             scale,
         } => zoom(&session, duration, scale),
-        Cmd::Project { session, output } => emit_project(&session, &output),
+        Cmd::Project {
+            session,
+            output,
+            no_audio_extract,
+        } => emit_project(&session, &output, !no_audio_extract),
     }
 }
 
@@ -201,7 +262,16 @@ fn start(
     system_audio: Option<String>,
     segment_secs: f64,
     run: bool,
+    for_secs: Option<f64>,
 ) -> Result<()> {
+    if for_secs.is_some() && !run {
+        return Err(CaptureError::message("--for-secs requires --run"));
+    }
+    if let Some(secs) = for_secs
+        && !(secs.is_finite() && secs > 0.0)
+    {
+        return Err(CaptureError::message("--for-secs must be > 0"));
+    }
     let video = parse_video(screen, window, region)?;
     let mut spec = CaptureSpec::screen();
     spec.video = video;
@@ -217,22 +287,65 @@ fn start(
         started_unix: None,
         duration: None,
     };
+    if run {
+        return run_supervised(dir, meta, for_secs);
+    }
     let store = SessionStore::create(&dir, meta)?;
     let grab = grab_command(&spec, store.root())?;
-    if run {
-        let _child = reelforge_capture_platform::spawn_grab(&grab)?;
-        println!("spawned {} in {}", grab.program, store.root().display());
-    } else {
-        print!("{} ", grab.program);
-        for a in &grab.args {
-            if a.contains(' ') {
-                print!("\"{a}\" ");
-            } else {
-                print!("{a} ");
-            }
+    print!("{} ", grab.program);
+    for a in &grab.args {
+        if a.contains(' ') {
+            print!("\"{a}\" ");
+        } else {
+            print!("{a} ");
         }
-        println!();
-        println!("session {}", store.root().display());
+    }
+    println!();
+    println!("session {}", store.root().display());
+    Ok(())
+}
+
+fn run_supervised(dir: PathBuf, meta: SessionMeta, for_secs: Option<f64>) -> Result<()> {
+    let mut sup = SessionSupervisor::start(&dir, meta)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_h = Arc::clone(&stop);
+    if let Err(e) = ctrlc::set_handler(move || stop_h.store(true, Ordering::SeqCst)) {
+        eprintln!("warning: no Ctrl+C handler ({e})");
+    }
+    let deadline = for_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
+    println!(
+        "recording {} (Ctrl+C to stop)",
+        sup.store().root().display()
+    );
+    loop {
+        for ev in sup.tick()? {
+            println!("{ev}");
+        }
+        let phase = sup.phase();
+        if matches!(phase, SessionPhase::Failed | SessionPhase::Stopped) {
+            break;
+        }
+        let timed_out = deadline.is_some_and(|d| Instant::now() >= d);
+        if stop.load(Ordering::SeqCst) || timed_out {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if matches!(sup.phase(), SessionPhase::Recording | SessionPhase::Paused) {
+        let _ = sup.stop()?;
+        println!("stopped");
+    }
+    let st = sup.status();
+    println!(
+        "session {}  segments={}  duration={:.3}s  {:?}",
+        st.id.as_str(),
+        st.committed_segments,
+        st.closed_duration.as_secs(),
+        st.phase
+    );
+    if let Some(err) = st.last_error {
+        eprintln!("{err}");
+        return Err(CaptureError::message(err));
     }
     Ok(())
 }
@@ -258,20 +371,63 @@ fn edit(session: &Path, op: EditCmd) -> Result<()> {
     save_edits(session, &list)
 }
 
-fn idle(session: &Path, threshold: f64, remove: bool) -> Result<()> {
+fn audio(session: &Path) -> Result<()> {
+    let store = SessionStore::open(session)?;
+    if !store.manifest().meta.spec.audio.has_any() {
+        println!("no audio legs configured for this session");
+        return Ok(());
+    }
+    let done = materialize_audio(&store)?;
+    println!(
+        "{} extracted, {} reused → {}",
+        done.extracted,
+        done.reused,
+        store.audio_sidecar_path().display()
+    );
+    for leg in &done.sidecar.legs {
+        println!(
+            "{}\ta:{}\t{} file(s)",
+            leg.leg.as_str(),
+            leg.audio_index,
+            leg.files.len()
+        );
+    }
+    for f in &done.failures {
+        eprintln!("warning: {f}");
+    }
+    Ok(())
+}
+
+fn idle(session: &Path, remove: bool, config: IdleConfig, signals: SignalOptions) -> Result<()> {
     let store = SessionStore::open(session)?;
     let events = store.load_events()?;
-    let dur = store.closed_duration();
-    let ranges = detect_idle(&events, dur, MediaTime::from_secs(threshold, HZ_1K)?)?;
-    println!("{} idle range(s)", ranges.len());
+    let tracks = session_signals(&store, &signals)?;
+    let report = detect_idle_multi(&events, &tracks, store.closed_duration(), config)?;
+
+    if report.is_blind() {
+        if remove {
+            return Err(CaptureError::message(
+                "idle --remove refused: no evidence (no pointer log, no measurable signal) — \
+                 that would propose deleting the whole session",
+            ));
+        }
+        println!("0 idle range(s) (no evidence; not treating the session as idle)");
+        return Ok(());
+    }
+
+    println!(
+        "{} idle range(s) agreed by: {}",
+        report.ranges.len(),
+        report.sources.join(" + ")
+    );
     if !remove {
-        for r in ranges {
+        for r in report.ranges {
             println!("{:.3}..{:.3}", r.start.as_secs(), r.end.as_secs());
         }
         return Ok(());
     }
     let mut list = load_edits(session)?;
-    for r in ranges {
+    for r in report.ranges {
         list.ops.push(EditDecision::Remove {
             start: r.start,
             end: r.end,
@@ -291,12 +447,25 @@ fn zoom(session: &Path, duration: f64, scale: f64) -> Result<()> {
     )?;
     let path = click_zoom_path(session);
     fs::write(&path, serde_json::to_string_pretty(&zooms)?)?;
-    println!("{} click zoom(s) → {}", zooms.len(), path.display());
+    println!(
+        "{} click-zoom marker(s) → {} (markers only; not crop/scale keyframes)",
+        zooms.len(),
+        path.display()
+    );
     Ok(())
 }
 
-fn emit_project(session: &Path, output: &Path) -> Result<()> {
+fn emit_project(session: &Path, output: &Path, extract_audio: bool) -> Result<()> {
     let store = SessionStore::open(session)?;
+    if extract_audio && !unresolved_audio(&store)?.is_empty() {
+        match materialize_audio(&store) {
+            Ok(done) => println!(
+                "audio: {} extracted, {} reused",
+                done.extracted, done.reused
+            ),
+            Err(e) => eprintln!("warning: audio demux failed ({e})"),
+        }
+    }
     let list = load_edits(session)?;
     let dur = store.closed_duration();
     let kept = if dur.ticks > 0 {
@@ -313,5 +482,12 @@ fn emit_project(session: &Path, output: &Path) -> Result<()> {
     let project = project_from_session(&store, &kept, &zooms)?;
     fs::write(output, to_json_pretty(&project)?)?;
     println!("wrote {}", output.display());
+    for leg in unresolved_audio(&store)? {
+        eprintln!(
+            "warning: {} audio track is muted — no demuxed file (run `reelforge-capture audio {}`)",
+            leg.as_str(),
+            session.display()
+        );
+    }
     Ok(())
 }

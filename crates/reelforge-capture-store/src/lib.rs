@@ -1,5 +1,9 @@
 //! Crash-safe session directory: manifest + WAL + closed segments + event log.
 
+mod audio;
+
+pub use audio::{AUDIO_SIDECAR_VERSION, AudioLegTrack, AudioSegmentFile, AudioSidecar};
+
 use reelforge_capture_core::{
     CaptureError, CaptureSpec, HZ_1K, MediaTime, PointerEvent, Result, SegmentId, SessionId,
     SessionMeta,
@@ -220,6 +224,37 @@ impl SessionStore {
             .meta
             .duration
             .unwrap_or_else(|| MediaTime::zero(HZ_1K))
+    }
+
+    /// Where `audio.json` lives.
+    #[must_use]
+    pub fn audio_sidecar_path(&self) -> PathBuf {
+        self.root.join("audio.json")
+    }
+
+    /// Read `audio.json` (`None` when audio was never materialized).
+    ///
+    /// # Errors
+    ///
+    /// I/O / JSON.
+    pub fn read_audio_sidecar(&self) -> Result<Option<AudioSidecar>> {
+        let path = self.audio_sidecar_path();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(&fs::read_to_string(path)?)?))
+    }
+
+    /// Write `audio.json` atomically.
+    ///
+    /// # Errors
+    ///
+    /// I/O / JSON.
+    pub fn write_audio_sidecar(&self, sidecar: &AudioSidecar) -> Result<()> {
+        let tmp = self.root.join("audio.json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(sidecar)?)?;
+        fs::rename(tmp, self.audio_sidecar_path())?;
+        Ok(())
     }
 
     fn events_path(&self) -> PathBuf {
