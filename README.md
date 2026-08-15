@@ -42,7 +42,7 @@ Capture never queries subjects and never embeds a SightLoom crate.
 - **Store:** `sessions/<id>/` with `manifest.json`, `wal.jsonl`, closed `segments/`, append-only events. Unfinished tail is dropped on recover.
 - **Clocks:** monotonic session clock; commit uses `ffprobe` duration when available; `FrameGap` / `AudioGap` / `DiskFull` / `DeviceLost` events when drift or host failure is visible. This is not a full A/V sync controller.
 - **Edit:** trim / remove / speed (speed **splits** partial overlaps).
-- **Idle:** agreement between **pointer**, **frame difference** (`signalstats` `YDIF`), and **audio energy** (`astats` RMS dBFS). A range is idle only where every measured source says so; a source that was not measured neither votes nor vetoes, and with no evidence at all `--remove` is refused. Idle can now be found on a session with no pointer log at all.
+- **Idle:** agreement between **pointer**, **frame difference** (`signalstats` `YDIF`), and **audio energy** (`astats` RMS dBFS). A range is idle only where every measured source says so; a source that was not measured neither votes nor vetoes, and with no evidence at all `--remove` is refused. Idle can now be found on a session with no pointer log at all. Pointer stillness **accumulates across samples** — the collector heartbeats a parked cursor every 250 ms, so comparing neighbouring samples would only ever see 250 ms of stillness.
 - **Project:** every committed segment is a media entry; kept ranges that span segments become multiple clips; audio legs become tracks over their demuxed files. Click-zoom is a marker. The document is built from typed structs and `validate()`d (no dangling media ids) before it is written.
 - **Schema:** `reelforge-capture-schema` is the single typed definition of `CaptureProject` v1 plus a golden document — see [CaptureProject contract](#captureproject-contract).
 
@@ -144,6 +144,35 @@ sessions/<id>/
 ```
 
 A crash mid-segment leaves the WAL + closed segments. Recovery drops the unfinished tail.
+
+## What analysis costs
+
+Post-capture work re-reads finished files with host ffmpeg, so it is worth
+knowing the budget before wiring it into a UI. Measured on Windows 11 /
+ffmpeg 9.0 with `cargo test -p reelforge-capture-analyze --release --test
+bench -- --ignored --nocapture` (6 × 5 s of 720p30 with two audio legs):
+
+| Step | Wall clock | vs. recording length |
+| --- | --- | --- |
+| Demux both audio legs (`-c copy`) | 0.87 s | 35× realtime |
+| Demux again (files already on disk) | 0.34 s | 90× realtime |
+| Measure frame difference | 0.48 s | 63× realtime |
+| Measure audio energy (2 legs) | 0.43 s | 70× realtime |
+| Measure both (what `idle` needs) | 0.88 s | 34× realtime |
+
+So a 10-minute recording costs roughly 18 s of analysis, and `project` — which
+demuxes but does not measure — costs about 17 s. One ffmpeg process is spawned
+per segment **per signal**; folding motion and audio into a single pass is the
+obvious next win.
+
+Everything after measurement is cheap. On a synthetic **one-hour** session
+(720 segments, 7 200 motion + 14 400 audio samples, 14 400 pointer events):
+
+| Step | Wall clock |
+| --- | --- |
+| `detect_idle_multi` (4 sources → 48 ranges) | 1 ms |
+| `project_from_session` + validate (576 clips, 2 160 media) | 14 ms |
+| Serialize / parse the 873 KB document | 1 ms / 2 ms |
 
 ## CaptureProject contract
 

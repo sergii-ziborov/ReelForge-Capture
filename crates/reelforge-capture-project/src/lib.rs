@@ -203,6 +203,15 @@ pub fn to_json_pretty(project: &CaptureProject) -> Result<String> {
     project.to_json_pretty()
 }
 
+/// Read a project document back (`version: 0` is migrated).
+///
+/// # Errors
+///
+/// JSON, or a version newer than this schema.
+pub fn parse_project(text: &str) -> Result<CaptureProject> {
+    CaptureProject::from_json(text)
+}
+
 /// Configured audio legs this session cannot address yet (no demuxed files).
 ///
 /// # Errors

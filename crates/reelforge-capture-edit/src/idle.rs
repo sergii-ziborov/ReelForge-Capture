@@ -59,8 +59,16 @@ impl IdleReport {
 
 /// Detect stretches where the cursor is still and nobody clicks.
 ///
+/// Stillness **accumulates across samples**: the run is anchored where the
+/// pointer last moved or clicked, not at the previous sample. The collector
+/// heartbeats a still cursor every 250 ms, so comparing neighbouring samples
+/// would only ever see 250 ms of stillness and never report idle at all.
+///
 /// `threshold` is the minimum still time. The last sample is held until
 /// `duration` (session end). No pointer samples → no idle ranges.
+///
+/// A click ends the run at its own instant; the frame-difference signal is
+/// what catches the UI response that follows it.
 ///
 /// # Errors
 ///
@@ -87,38 +95,49 @@ pub fn detect_idle(
 
     let end_s = duration.as_secs();
     // Absence of pointer evidence is unknown, not idle.
-    if marks.is_empty() {
+    let Some(first) = marks.first().copied() else {
         return Ok(Vec::new());
-    }
+    };
 
     let mut idle = Vec::new();
     // Do not invent idle before the first sample — the collector may have started late.
-    let mut last_t = marks[0].0;
-    let mut last_xy = marks[0];
+    let mut anchor = first.0;
+    let mut anchor_xy = (first.1, first.2);
 
-    for m in marks
-        .iter()
-        .skip(1)
-        .copied()
-        .chain(std::iter::once((end_s, last_xy.1, last_xy.2, false)))
-    {
-        let dt = m.0 - last_t;
-        let moved = m.1 != last_xy.1 || m.2 != last_xy.2;
-        let click = last_xy.3 || m.3;
-        if dt + 1e-9 >= need && !moved && !click {
-            idle.push(MediaRange::new(
-                MediaTime::from_secs(last_t, scale)?,
-                MediaTime::from_secs(m.0, scale)?,
-            )?);
+    for m in marks.iter().skip(1).copied() {
+        let moved = m.1 != anchor_xy.0 || m.2 != anchor_xy.1;
+        if !moved && !m.3 {
+            continue;
         }
-        if m.0 < end_s || marks.len() == 1 {
-            last_t = m.0;
-            last_xy = m;
-        } else {
-            last_t = m.0;
+        if let Some(range) = still_range(anchor, m.0, need, end_s, scale)? {
+            idle.push(range);
         }
+        anchor = m.0;
+        anchor_xy = (m.1, m.2);
+    }
+    // The cursor holds its last position until the session ends.
+    if let Some(range) = still_range(anchor, end_s, need, end_s, scale)? {
+        idle.push(range);
     }
     Ok(idle)
+}
+
+/// `[from, to)` clamped to the session, if it is still enough to matter.
+fn still_range(
+    from: f64,
+    to: f64,
+    need: f64,
+    end_s: f64,
+    scale: u32,
+) -> Result<Option<MediaRange>> {
+    let to = to.min(end_s);
+    if to - from + 1e-9 < need || to <= from {
+        return Ok(None);
+    }
+    Ok(Some(MediaRange::new(
+        MediaTime::from_secs(from, scale)?,
+        MediaTime::from_secs(to, scale)?,
+    )?))
 }
 
 /// Stretches of a measured signal that stay at or below `above`.
@@ -334,6 +353,49 @@ mod tests {
         let ev = vec![cur(0.0, 0, 0), cur(1.0, 50, 0), cur(2.0, 50, 0)];
         let idle = detect_idle(&ev, t(2.0), t(1.5)).unwrap();
         assert!(idle.is_empty());
+    }
+
+    /// The collector heartbeats a still cursor every 250 ms. Comparing
+    /// neighbouring samples would see 0.25 s of stillness and report nothing.
+    #[test]
+    fn heartbeat_samples_accumulate_into_idle() {
+        let mut ev = Vec::new();
+        for i in 0..80 {
+            let at = f64::from(i) * 0.25;
+            // Moves for the first 5 s, then parks for 15 s.
+            let x = if at < 5.0 { i * 3 } else { 60 };
+            ev.push(cur(at, x, 10));
+        }
+        let idle = detect_idle(&ev, t(20.0), t(3.0)).unwrap();
+        assert_eq!(idle.len(), 1, "{idle:?}");
+        assert!((idle[0].start.as_secs() - 5.0).abs() < 1e-9, "{idle:?}");
+        assert!((idle[0].end.as_secs() - 20.0).abs() < 1e-9, "{idle:?}");
+    }
+
+    #[test]
+    fn a_click_ends_the_still_run_at_its_own_instant() {
+        let mut ev = Vec::new();
+        for i in 0..40 {
+            ev.push(cur(f64::from(i) * 0.25, 7, 7));
+        }
+        ev.push(PointerEvent::Click {
+            t: t(5.0),
+            x: 7,
+            y: 7,
+            button: reelforge_capture_core::ClickButton::Left,
+        });
+        let idle = detect_idle(&ev, t(10.0), t(3.0)).unwrap();
+        assert_eq!(idle.len(), 2, "{idle:?}");
+        assert!((idle[0].end.as_secs() - 5.0).abs() < 1e-9, "{idle:?}");
+        assert!((idle[1].start.as_secs() - 5.0).abs() < 1e-9, "{idle:?}");
+    }
+
+    #[test]
+    fn events_past_the_closed_duration_are_clamped() {
+        let ev = vec![cur(0.0, 1, 1), cur(30.0, 1, 1)];
+        let idle = detect_idle(&ev, t(10.0), t(3.0)).unwrap();
+        assert_eq!(idle.len(), 1);
+        assert!((idle[0].end.as_secs() - 10.0).abs() < 1e-9, "{idle:?}");
     }
 
     #[test]
