@@ -18,6 +18,7 @@ use reelforge_capture_core::{
     SessionMeta, SignalKind, SignalTrack,
 };
 use reelforge_capture_edit::{IdleConfig, KeptRange, detect_idle_multi};
+use reelforge_capture_platform::{audio_level_series, motion_series};
 use reelforge_capture_project::{project_from_session, to_json_pretty};
 use reelforge_capture_store::{
     AudioLegTrack, AudioSegmentFile, AudioSidecar, SegmentRecord, SessionStore,
@@ -178,7 +179,36 @@ fn host_ffmpeg_analysis_budget() {
     let (tracks, took) =
         time(|| session_signals(&store, &SignalOptions::default()).expect("signals"));
     assert_eq!(tracks.len(), 3);
-    report("measure both (idle input)", took, media_secs);
+    report("measure both, one pass/segment", took, media_secs);
+
+    // What the same work costs with a decode pass per signal — the shape
+    // session_signals falls back to when a segment defeats the single pass.
+    let (separate, took) = time(|| {
+        let mut n = 0usize;
+        for seg in &store.manifest().segments {
+            let file = store.root().join(&seg.path);
+            n += usize::from(
+                motion_series(&file, SignalOptions::default().sample_fps)
+                    .expect("motion")
+                    .is_some(),
+            );
+            for index in 0..2 {
+                n += usize::from(
+                    audio_level_series(
+                        &file,
+                        index,
+                        SignalOptions::default().audio_window_secs,
+                        "a",
+                    )
+                    .expect("audio")
+                    .is_some(),
+                );
+            }
+        }
+        n
+    });
+    assert_eq!(separate, usize::try_from(SEG_COUNT).expect("fits") * 3);
+    report("measure both, pass per signal", took, media_secs);
 
     let samples: usize = tracks.iter().map(|t| t.samples.len()).sum();
     println!("{:<34} {samples} samples", "signal volume");

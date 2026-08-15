@@ -32,6 +32,21 @@ ReelForge compile + encode
 
 Capture never queries subjects and never embeds a SightLoom crate.
 
+**Why post-capture analysis lives here.** Measuring frame difference and audio
+energy can look like render-engine work, but they are different jobs. ReelForge
+compiles and encodes a *project*; it never sees a session, a segment, an event
+log, or a pointer sample. Idle is an editorial decision about a **session**, so
+moving it into ReelForge would drag Capture's whole model — store layout, WAL,
+`events.jsonl` — into the render engine. Nor is this vision work: it is
+`signalstats` and `astats` over files Capture just wrote, through the host
+ffmpeg CLI it already depends on, with no libav link and no SightLoom crate.
+
+The boundary that does hold: the moment a signal becomes **semantic** — who is
+speaking, which window is focused, where a scene cuts — it belongs to SightLoom
+or Intelligence, and Capture should consume a handle instead of computing it.
+And if ReelForge ever publishes a shared media-probe crate, the ffmpeg argv
+layer here should move to it. The *decisions* stay in Capture either way.
+
 ## What v0.1 does
 
 - **Supervisor:** `start --run` owns the ffmpeg child (PID file, Ctrl+C / `--for-secs`, pause/resume API, WAL harvest of closed `000001.mkv`…). Fire-and-forget spawn is gone.
@@ -154,16 +169,22 @@ bench -- --ignored --nocapture` (6 × 5 s of 720p30 with two audio legs):
 
 | Step | Wall clock | vs. recording length |
 | --- | --- | --- |
-| Demux both audio legs (`-c copy`) | 0.87 s | 35× realtime |
-| Demux again (files already on disk) | 0.34 s | 90× realtime |
-| Measure frame difference | 0.48 s | 63× realtime |
-| Measure audio energy (2 legs) | 0.43 s | 70× realtime |
-| Measure both (what `idle` needs) | 0.88 s | 34× realtime |
+| Demux both audio legs (`-c copy`) | 0.68 s | 44× realtime |
+| Demux again (files already on disk) | 0.35 s | 86× realtime |
+| Measure frame difference | 0.50 s | 60× realtime |
+| Measure audio energy (2 legs) | 0.31 s | 98× realtime |
+| **Measure both — one pass per segment** | **0.55 s** | **55× realtime** |
+| Measure both — a pass per signal (fallback) | 1.03 s | 29× realtime |
 
-So a 10-minute recording costs roughly 18 s of analysis, and `project` — which
-demuxes but does not measure — costs about 17 s. One ffmpeg process is spawned
-per segment **per signal**; folding motion and audio into a single pass is the
-obvious next win.
+Each segment is read **once**: one ffmpeg invocation demuxes every audio leg,
+and one more measures the picture and every leg together (each leg is
+downmixed to mono and merged, so `astats` reports it under its own channel
+key). The per-signal path is still there and is what a segment falls back to
+when the combined pass cannot read it — an old ffmpeg build, or a stream the
+device never opened — so one broken leg does not cost the others.
+
+So a 10-minute recording costs roughly 11 s to measure, and `project` — which
+demuxes but does not measure — about 14 s.
 
 Everything after measurement is cheap. On a synthetic **one-hour** session
 (720 segments, 7 200 motion + 14 400 audio samples, 14 400 pointer events):

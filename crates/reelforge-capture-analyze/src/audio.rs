@@ -1,11 +1,10 @@
 //! Demux each configured audio leg into its own file.
 
 use reelforge_capture_core::{AudioLeg, MediaTime, Result, SegmentId};
-use reelforge_capture_platform::{extract_audio_stream, probe_duration};
-use reelforge_capture_store::{
-    AudioLegTrack, AudioSegmentFile, AudioSidecar, SegmentRecord, SessionStore,
-};
+use reelforge_capture_platform::{extract_audio_stream, extract_audio_streams, probe_duration};
+use reelforge_capture_store::{AudioLegTrack, AudioSegmentFile, AudioSidecar, SessionStore};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Container for demuxed legs. Capture always encodes AAC, so an MP4 audio
 /// container takes the copied stream without a re-encode.
@@ -30,8 +29,11 @@ pub struct AudioMaterialization {
 /// happened. Already-extracted files are kept (committed segments are
 /// immutable), so calling this twice is cheap.
 ///
-/// A leg that fails for one segment keeps its other segments: the sidecar
-/// then describes a real hole instead of pretending the audio is continuous.
+/// All legs of a segment come out of **one** ffmpeg invocation — the file is
+/// read once. If that fails, each leg is retried on its own, so a stream the
+/// device never opened does not cost the legs that recorded fine. A leg that
+/// fails for one segment keeps its other segments: the sidecar then describes
+/// a real hole instead of pretending the audio is continuous.
 ///
 /// # Errors
 ///
@@ -46,33 +48,72 @@ pub fn materialize_audio(store: &SessionStore) -> Result<AudioMaterialization> {
         failures: Vec::new(),
     };
 
-    for (leg, device) in mix.configured() {
-        let Some(audio_index) = mix.audio_index(leg) else {
-            continue;
-        };
-        fs::create_dir_all(store.root().join("audio").join(leg.as_str()))?;
-        let mut track = AudioLegTrack {
-            leg,
-            device: device.name.clone(),
-            audio_index,
+    let legs: Vec<(AudioLeg, u32, String)> = mix
+        .configured()
+        .iter()
+        .filter_map(|(leg, device)| {
+            mix.audio_index(*leg)
+                .map(|index| (*leg, index, device.name.clone()))
+        })
+        .collect();
+    let mut tracks: Vec<AudioLegTrack> = legs
+        .iter()
+        .map(|(leg, index, device)| AudioLegTrack {
+            leg: *leg,
+            device: device.clone(),
+            audio_index: *index,
             files: Vec::new(),
-        };
-        for seg in &segments {
-            match demux_segment(store, seg, leg, audio_index) {
-                Ok((file, reused)) => {
-                    if reused {
-                        out.reused += 1;
-                    } else {
-                        out.extracted += 1;
-                    }
-                    track.files.push(file);
-                }
-                Err(e) => out.failures.push(e.to_string()),
-            }
-        }
-        out.sidecar.legs.push(track);
+        })
+        .collect();
+    for (leg, _, _) in &legs {
+        fs::create_dir_all(store.root().join("audio").join(leg.as_str()))?;
     }
 
+    for seg in &segments {
+        let src = store.root().join(&seg.path);
+        let mut pending: Vec<(u32, PathBuf)> = Vec::new();
+        for (leg, index, _) in &legs {
+            let dst = store.root().join(audio_rel_path(*leg, seg.id));
+            if written(&dst) {
+                out.reused += 1;
+            } else {
+                pending.push((*index, dst));
+            }
+        }
+        if !pending.is_empty() && extract_audio_streams(&src, &pending).is_err() {
+            // One unreadable stream must not cost the others.
+            for (index, dst) in &pending {
+                if let Err(e) = extract_audio_stream(&src, *index, dst) {
+                    out.failures.push(e.to_string());
+                }
+            }
+        }
+        for (slot, (leg, _, _)) in legs.iter().enumerate() {
+            let rel = audio_rel_path(*leg, seg.id);
+            let dst = store.root().join(&rel);
+            if !written(&dst) {
+                continue; // a hole; the failure is already recorded
+            }
+            if pending.iter().any(|(_, p)| *p == dst) {
+                out.extracted += 1;
+            }
+            let duration = probe_duration(&dst).ok().flatten();
+            let scale = seg.start.timescale.max(1);
+            tracks[slot].files.push(AudioSegmentFile {
+                segment: seg.id,
+                path: rel,
+                start: seg.start,
+                end: seg.end,
+                duration,
+                gap: duration.map(|d| MediaTime {
+                    ticks: d.ticks - (seg.end.ticks - seg.start.ticks),
+                    timescale: scale,
+                }),
+            });
+        }
+    }
+
+    out.sidecar.legs = tracks;
     store.write_audio_sidecar(&out.sidecar)?;
     Ok(out)
 }
@@ -83,35 +124,9 @@ pub fn audio_rel_path(leg: AudioLeg, segment: SegmentId) -> String {
     format!("audio/{}/{}.{AUDIO_EXT}", leg.as_str(), segment.file_stem())
 }
 
-fn demux_segment(
-    store: &SessionStore,
-    seg: &SegmentRecord,
-    leg: AudioLeg,
-    audio_index: u32,
-) -> Result<(AudioSegmentFile, bool)> {
-    let rel = audio_rel_path(leg, seg.id);
-    let dst = store.root().join(&rel);
-    let reused = fs::metadata(&dst).is_ok_and(|m| m.len() > 0);
-    if !reused {
-        extract_audio_stream(store.root().join(&seg.path), audio_index, &dst)?;
-    }
-    let duration = probe_duration(&dst).ok().flatten();
-    let scale = seg.start.timescale.max(1);
-    let gap = duration.map(|d| MediaTime {
-        ticks: d.ticks - (seg.end.ticks - seg.start.ticks),
-        timescale: scale,
-    });
-    Ok((
-        AudioSegmentFile {
-            segment: seg.id,
-            path: rel,
-            start: seg.start,
-            end: seg.end,
-            duration,
-            gap,
-        },
-        reused,
-    ))
+/// Whether a demuxed file is already on disk with content.
+fn written(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
 #[cfg(test)]

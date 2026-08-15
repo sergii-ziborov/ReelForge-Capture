@@ -20,6 +20,7 @@ pub use list::{
 pub use pointer::{FakePointer, HostPointer, NullPointer, PointerSample, PointerSource};
 pub use probe::{parse_duration_secs, probe_audio_duration, probe_duration};
 pub use signals::{
-    AUDIO_RMS_KEY, MOTION_KEY, SILENCE_FLOOR_DB, audio_level_series, extract_audio_stream,
-    motion_series, parse_metadata_series,
+    AUDIO_RMS_KEY, MOTION_KEY, SILENCE_FLOOR_DB, SegmentSignals, audio_level_series,
+    extract_audio_stream, extract_audio_streams, measure_segment, motion_series,
+    parse_metadata_series,
 };

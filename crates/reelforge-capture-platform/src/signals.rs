@@ -12,7 +12,8 @@
 //! treat that as *unknown*, never as *quiet*.
 
 use reelforge_capture_core::{CaptureError, HZ_1K, MediaTime, Result, SignalKind, SignalTrack};
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Frame-difference metadata key exported by `signalstats`.
@@ -96,6 +97,147 @@ pub fn audio_level_series(
     ))
 }
 
+/// Everything measured in a single decode pass over one segment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentSignals {
+    /// Frame difference, when video was measured.
+    pub motion: Option<SignalTrack>,
+    /// Audio energy per requested stream, in the order they were requested.
+    pub audio: Vec<SignalTrack>,
+}
+
+/// Measure the picture and every listed audio stream in **one** ffmpeg pass.
+///
+/// Running a pass per signal spawns (and decodes) once per signal; this walks
+/// the file once. Each leg is downmixed to mono and merged, so `astats`
+/// reports it under its own channel key — the printers share stdout but never
+/// share a key, which is what makes the output unambiguous.
+///
+/// `Ok(None)` means the pass did not produce anything usable (no ffmpeg, a
+/// missing stream, a filter this build lacks). Callers should fall back to
+/// [`motion_series`] / [`audio_level_series`] rather than treat it as silence.
+///
+/// # Errors
+///
+/// Invalid sampling parameters, or ffmpeg I/O other than a missing binary.
+pub fn measure_segment(
+    path: impl AsRef<Path>,
+    sample_fps: Option<f64>,
+    audio_indices: &[u32],
+    window_secs: f64,
+) -> Result<Option<SegmentSignals>> {
+    if sample_fps.is_none() && audio_indices.is_empty() {
+        return Ok(None);
+    }
+    if let Some(fps) = sample_fps
+        && !(fps.is_finite() && fps > 0.0)
+    {
+        return Err(CaptureError::message(format!(
+            "sample fps must be > 0 (got {fps})"
+        )));
+    }
+    if !audio_indices.is_empty() && (!window_secs.is_finite() || window_secs <= 0.0) {
+        return Err(CaptureError::message(format!(
+            "audio window must be > 0 (got {window_secs})"
+        )));
+    }
+
+    let (graph, maps) = measure_graph(sample_fps, audio_indices, window_secs);
+    let mut args = vec!["-filter_complex".to_string(), graph];
+    for label in &maps {
+        args.push("-map".into());
+        args.push(label.clone());
+    }
+    let Some(raw) = run_ffmpeg(&args, path.as_ref())? else {
+        return Ok(None);
+    };
+
+    let mut out = SegmentSignals {
+        motion: None,
+        audio: Vec::new(),
+    };
+    if let Some(fps) = sample_fps {
+        out.motion = fill(
+            SignalTrack::new(
+                SignalKind::Motion,
+                "video",
+                MediaTime::from_secs(1.0 / fps, HZ_1K)?,
+            ),
+            &raw,
+            MOTION_KEY,
+            None,
+        );
+    }
+    let window = MediaTime::from_secs(window_secs.max(f64::MIN_POSITIVE), HZ_1K)?;
+    for (slot, index) in audio_indices.iter().enumerate() {
+        let Some(track) = fill(
+            SignalTrack::new(SignalKind::AudioLevel, format!("audio:{index}"), window),
+            &raw,
+            &channel_rms_key(slot),
+            Some(SILENCE_FLOOR_DB),
+        ) else {
+            // A partial audio result would silently drop a leg.
+            return Ok(None);
+        };
+        out.audio.push(track);
+    }
+    if out.motion.is_none() && out.audio.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+/// `astats` numbers channels from 1; after the merge, slot `i` is channel `i + 1`.
+fn channel_rms_key(slot: usize) -> String {
+    format!("lavfi.astats.{}.RMS_level", slot + 1)
+}
+
+/// Filter graph plus the output labels to map.
+fn measure_graph(
+    sample_fps: Option<f64>,
+    audio_indices: &[u32],
+    window_secs: f64,
+) -> (String, Vec<String>) {
+    let mut chains: Vec<String> = Vec::new();
+    let mut maps: Vec<String> = Vec::new();
+    if let Some(fps) = sample_fps {
+        chains.push(format!(
+            "[0:v]fps={fps},scale=160:-2,signalstats,metadata=print:key={MOTION_KEY}:file=-[rfv]"
+        ));
+        maps.push("[rfv]".into());
+    }
+    if !audio_indices.is_empty() {
+        let rate = 8_000.0_f64;
+        let n = (rate * window_secs).round().max(1.0);
+        let mut labels = String::new();
+        let mut prints = String::new();
+        for (slot, index) in audio_indices.iter().enumerate() {
+            // Mono per leg keeps the channel numbering fixed regardless of
+            // what the host device actually opened.
+            chains.push(format!(
+                "[0:a:{index}]aresample={rate:.0},aformat=channel_layouts=mono[rfa{slot}]"
+            ));
+            write!(labels, "[rfa{slot}]").expect("string write");
+            write!(
+                prints,
+                ",ametadata=print:key={}:file=-",
+                channel_rms_key(slot)
+            )
+            .expect("string write");
+        }
+        let merge = if audio_indices.len() > 1 {
+            format!("{labels}amerge=inputs={},", audio_indices.len())
+        } else {
+            labels
+        };
+        chains.push(format!(
+            "{merge}asetnsamples=n={n:.0}:p=0,astats=metadata=1:reset=1{prints}[rfa]"
+        ));
+        maps.push("[rfa]".into());
+    }
+    (chains.join(";"), maps)
+}
+
 /// Demux one audio stream into its own file (`-c copy`, no re-encode).
 ///
 /// This is what makes an audio track in a `CaptureProject` unambiguous: the
@@ -110,21 +252,42 @@ pub fn extract_audio_stream(
     audio_index: u32,
     dst: impl AsRef<Path>,
 ) -> Result<()> {
+    extract_audio_streams(src, &[(audio_index, dst.as_ref().to_path_buf())])
+}
+
+/// Demux several audio streams of one file in a single ffmpeg invocation.
+///
+/// ffmpeg accepts many outputs per input, so N legs cost one process and one
+/// read instead of N. Either every target is written or the call fails —
+/// callers that want per-leg isolation retry with [`extract_audio_stream`].
+///
+/// # Errors
+///
+/// Missing ffmpeg, a missing stream, or a non-zero exit (stderr is included).
+pub fn extract_audio_streams(src: impl AsRef<Path>, targets: &[(u32, PathBuf)]) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
     let program = ffmpeg_program();
-    let out = Command::new(&program)
-        .args(["-hide_banner", "-v", "error", "-y", "-i"])
-        .arg(src.as_ref())
-        .args(["-map", &format!("0:a:{audio_index}"), "-vn", "-sn", "-dn"])
-        .args(["-c", "copy"])
-        .arg(dst.as_ref())
+    let mut cmd = Command::new(&program);
+    cmd.args(["-hide_banner", "-v", "error", "-y", "-i"])
+        .arg(src.as_ref());
+    for (audio_index, dst) in targets {
+        cmd.args(["-map", &format!("0:a:{audio_index}"), "-vn", "-sn", "-dn"])
+            .args(["-c", "copy"])
+            .arg(dst);
+    }
+    let out = cmd
         .output()
         .map_err(|e| CaptureError::io(format!("{program} extract: {e}")))?;
     if out.status.success() {
         return Ok(());
     }
+    let legs: Vec<String> = targets.iter().map(|(i, _)| format!("a:{i}")).collect();
     let why = String::from_utf8_lossy(&out.stderr);
     Err(CaptureError::io(format!(
-        "extract a:{audio_index} from {}: {}",
+        "extract {} from {}: {}",
+        legs.join(", "),
         src.as_ref().display(),
         why.trim()
     )))
@@ -289,5 +452,39 @@ lavfi.signalstats.YDIF=1.5
     fn rejects_impossible_sampling_rates() {
         assert!(motion_series("x.mkv", 0.0).is_err());
         assert!(audio_level_series("x.mkv", 0, -1.0, "audio:system").is_err());
+        assert!(measure_segment("x.mkv", Some(0.0), &[], 0.5).is_err());
+        assert!(measure_segment("x.mkv", None, &[0], 0.0).is_err());
+        assert!(measure_segment("x.mkv", None, &[], 0.5).unwrap().is_none());
+    }
+
+    #[test]
+    fn one_pass_graph_keeps_every_leg_on_its_own_key() {
+        let (graph, maps) = measure_graph(Some(2.0), &[0, 1], 0.5);
+        assert_eq!(maps, ["[rfv]", "[rfa]"]);
+        assert!(graph.contains("[0:a:0]aresample=8000"), "{graph}");
+        assert!(graph.contains("[0:a:1]aresample=8000"), "{graph}");
+        assert!(graph.contains("[rfa0][rfa1]amerge=inputs=2"), "{graph}");
+        assert!(graph.contains("asetnsamples=n=4000"), "{graph}");
+        // Distinct keys are what makes the shared stdout parseable.
+        assert!(graph.contains("key=lavfi.astats.1.RMS_level"), "{graph}");
+        assert!(graph.contains("key=lavfi.astats.2.RMS_level"), "{graph}");
+        assert!(graph.contains(MOTION_KEY), "{graph}");
+    }
+
+    #[test]
+    fn a_single_leg_needs_no_merge() {
+        let (graph, maps) = measure_graph(None, &[1], 0.5);
+        assert_eq!(maps, ["[rfa]"]);
+        assert!(!graph.contains("amerge"), "{graph}");
+        assert!(graph.contains("[rfa0]asetnsamples"), "{graph}");
+        assert!(graph.contains("key=lavfi.astats.1.RMS_level"), "{graph}");
+    }
+
+    #[test]
+    fn motion_only_graph_has_no_audio_chain() {
+        let (graph, maps) = measure_graph(Some(4.0), &[], 0.5);
+        assert_eq!(maps, ["[rfv]"]);
+        assert!(graph.contains("fps=4"), "{graph}");
+        assert!(!graph.contains("astats"), "{graph}");
     }
 }
