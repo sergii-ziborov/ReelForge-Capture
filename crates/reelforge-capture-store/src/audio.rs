@@ -81,7 +81,8 @@ pub struct AudioSegmentFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<MediaTime>,
     /// `duration − (end − start)`: audio short of (negative) or past (positive)
-    /// its video segment. Kept, not corrected.
+    /// its video segment. The live clock is slewed to **video**; this gap is
+    /// kept so the project can insert a timeline hole instead of stretching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap: Option<MediaTime>,
 }

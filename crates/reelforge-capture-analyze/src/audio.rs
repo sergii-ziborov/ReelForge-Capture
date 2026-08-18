@@ -2,7 +2,9 @@
 
 use reelforge_capture_core::{AudioLeg, MediaTime, Result, SegmentId};
 use reelforge_capture_platform::{extract_audio_stream, extract_audio_streams, probe_duration};
-use reelforge_capture_store::{AudioLegTrack, AudioSegmentFile, AudioSidecar, SessionStore};
+use reelforge_capture_store::{
+    AudioLegTrack, AudioSegmentFile, AudioSidecar, ClockSidecar, SessionStore,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,7 @@ pub struct AudioMaterialization {
 pub fn materialize_audio(store: &SessionStore) -> Result<AudioMaterialization> {
     let mix = store.manifest().meta.spec.audio.clone();
     let segments = store.manifest().segments.clone();
+    let clocks = store.read_clocks()?.unwrap_or_default();
     let mut out = AudioMaterialization {
         sidecar: AudioSidecar::new(),
         extracted: 0,
@@ -88,7 +91,7 @@ pub fn materialize_audio(store: &SessionStore) -> Result<AudioMaterialization> {
                 }
             }
         }
-        for (slot, (leg, _, _)) in legs.iter().enumerate() {
+        for (slot, (leg, index, _)) in legs.iter().enumerate() {
             let rel = audio_rel_path(*leg, seg.id);
             let dst = store.root().join(&rel);
             if !written(&dst) {
@@ -97,8 +100,11 @@ pub fn materialize_audio(store: &SessionStore) -> Result<AudioMaterialization> {
             if pending.iter().any(|(_, p)| *p == dst) {
                 out.extracted += 1;
             }
-            let duration = probe_duration(&dst).ok().flatten();
             let scale = seg.start.timescale.max(1);
+            let duration = probe_duration(&dst)
+                .ok()
+                .flatten()
+                .or_else(|| clock_leg_duration(&clocks, seg.id, *index, scale));
             tracks[slot].files.push(AudioSegmentFile {
                 segment: seg.id,
                 path: rel,
@@ -127,6 +133,16 @@ pub fn audio_rel_path(leg: AudioLeg, segment: SegmentId) -> String {
 /// Whether a demuxed file is already on disk with content.
 fn written(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+fn clock_leg_duration(
+    clocks: &ClockSidecar,
+    segment: SegmentId,
+    index: u32,
+    scale: u32,
+) -> Option<MediaTime> {
+    let secs = clocks.segment(segment)?.audio_leg(index)?.duration_secs?;
+    MediaTime::from_secs(secs, scale).ok()
 }
 
 #[cfg(test)]

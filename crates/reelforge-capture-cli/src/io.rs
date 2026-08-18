@@ -65,3 +65,28 @@ pub(crate) fn save_edits(session: &Path, list: &EditList) -> Result<()> {
 pub(crate) fn click_zoom_path(session: &Path) -> PathBuf {
     session.join("click_zoom.json")
 }
+
+/// Resolve `--session ID` or a session directory.
+///
+/// An existing directory with a manifest / WAL wins. Otherwise the id is
+/// looked up under `--dir` (default `sessions/`). Host should not invent
+/// this path by globbing `sessions/<id>/segments/`.
+pub(crate) fn resolve_session(session: &str, dir: &Path) -> Result<PathBuf> {
+    let given = Path::new(session);
+    if is_session_dir(given) {
+        return Ok(given.to_path_buf());
+    }
+    let under = dir.join(session);
+    if is_session_dir(&under) {
+        return Ok(under);
+    }
+    Err(CaptureError::message(format!(
+        "session not found: {session} (tried {} and {})",
+        given.display(),
+        under.display()
+    )))
+}
+
+fn is_session_dir(path: &Path) -> bool {
+    path.is_dir() && (path.join("manifest.json").is_file() || path.join("wal.jsonl").is_file())
+}

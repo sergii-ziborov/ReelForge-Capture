@@ -71,6 +71,13 @@ pub fn grab_command_on(os: HostOs, spec: &CaptureSpec, session_dir: &Path) -> Re
         "1".into(),
         "-segment_start_number".into(),
         "1".into(),
+        "-segment_list".into(),
+        session_dir
+            .join("closed.list")
+            .to_string_lossy()
+            .into_owned(),
+        "-segment_list_type".into(),
+        "flat".into(),
         pattern,
     ]);
     Ok(FfmpegGrab { program, args })
@@ -145,6 +152,12 @@ mod tests {
             g.args
                 .windows(2)
                 .any(|w| w == ["-segment_start_number", "1"])
+        );
+        assert!(g.args.iter().any(|a| a.ends_with("closed.list")));
+        assert!(
+            g.args
+                .windows(2)
+                .any(|w| w == ["-segment_list_type", "flat"])
         );
     }
 

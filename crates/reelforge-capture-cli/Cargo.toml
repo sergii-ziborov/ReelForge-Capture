@@ -23,6 +23,7 @@ reelforge-capture-core = { workspace = true }
 reelforge-capture-edit = { workspace = true }
 reelforge-capture-platform = { workspace = true }
 reelforge-capture-project = { workspace = true }
+reelforge-capture-schema = { workspace = true }
 reelforge-capture-runtime = { workspace = true }
 reelforge-capture-store = { workspace = true }
 serde_json = { workspace = true }

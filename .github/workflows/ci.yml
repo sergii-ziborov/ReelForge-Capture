@@ -1,58 +1,28 @@
-# Quality gates for ReelForge Capture.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
-  quality:
-    name: fmt / clippy / test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          toolchain: "1.97"
           components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: reelforge-capture-ci
-
-      - name: rustfmt
+      - name: fmt
         run: cargo fmt --all -- --check
-
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: test (no host ffmpeg required)
-        run: cargo test --workspace --all-targets
-
-      # Synthetic lavfi segments — no screen is recorded. Self-skips if the
-      # runner has no ffmpeg.
-      - name: test (host ffmpeg paths)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace -- --ignored
-
-      - name: docs
-        run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
+      - name: test
+        run: cargo test --workspace

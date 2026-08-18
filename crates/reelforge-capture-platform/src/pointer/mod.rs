@@ -1,7 +1,23 @@
-//! Host cursor / button sample (Windows). Other hosts return `None`.
+//! Host cursor / button / key / foreground-window sample.
+//!
+//! Windows uses `GetCursorPos` / `GetAsyncKeyState`. macOS uses CoreGraphics.
+//! Linux uses X11 via `dlopen` (Wayland-only sessions yield `None`).
 
-/// One poll of the system pointer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // linux / macOS collectors; unit tests cover the helpers
+mod decode;
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "linux")]
+mod x11;
+
+/// One poll of the system pointer / keyboard / foreground window.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PointerSample {
     /// Desktop X.
     pub x: i32,
@@ -13,6 +29,12 @@ pub struct PointerSample {
     pub right: bool,
     /// Middle button down.
     pub middle: bool,
+    /// Any non-mouse key is down.
+    pub key: bool,
+    /// Foreground window handle (`0` if unknown).
+    pub window: u64,
+    /// Foreground window title (only filled when the handle is known).
+    pub title: String,
 }
 
 /// Something that can be polled for cursor position / buttons.
@@ -31,7 +53,7 @@ impl PointerSource for NullPointer {
     }
 }
 
-/// Host collector. Implemented on Windows; elsewhere this is [`NullPointer`].
+/// Host collector for the compile target.
 #[derive(Debug, Default)]
 pub struct HostPointer {
     inner: HostInner,
@@ -44,45 +66,20 @@ impl PointerSource for HostPointer {
 }
 
 #[cfg(windows)]
+type HostInner = windows::Collector;
+
+#[cfg(target_os = "macos")]
+type HostInner = macos::Collector;
+
+#[cfg(target_os = "linux")]
+type HostInner = x11::Collector;
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 #[derive(Debug, Default)]
 struct HostInner;
 
-#[cfg(windows)]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl HostInner {
-    #[allow(clippy::unused_self)]
-    fn sample(&mut self) -> Option<PointerSample> {
-        use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
-        };
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-        let mut pt = POINT { x: 0, y: 0 };
-        let ok = unsafe { GetCursorPos(&raw mut pt) };
-        if ok == 0 {
-            return None;
-        }
-        let down = |vk: u16| {
-            let s = unsafe { GetAsyncKeyState(i32::from(vk)) };
-            s < 0
-        };
-        Some(PointerSample {
-            x: pt.x,
-            y: pt.y,
-            left: down(VK_LBUTTON),
-            right: down(VK_RBUTTON),
-            middle: down(VK_MBUTTON),
-        })
-    }
-}
-
-#[cfg(not(windows))]
-#[derive(Debug, Default)]
-struct HostInner;
-
-#[cfg(not(windows))]
-impl HostInner {
-    #[allow(clippy::unused_self)]
     fn sample(&mut self) -> Option<PointerSample> {
         None
     }
@@ -97,7 +94,7 @@ pub struct FakePointer {
 
 impl PointerSource for FakePointer {
     fn sample(&mut self) -> Option<PointerSample> {
-        self.next
+        self.next.clone()
     }
 }
 
@@ -108,5 +105,11 @@ mod tests {
     #[test]
     fn null_yields_nothing() {
         assert!(NullPointer.sample().is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_collector_returns_a_sample() {
+        assert!(HostPointer::default().sample().is_some());
     }
 }

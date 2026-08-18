@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Post-capture audio demux and signal measurement for Capture sessions"
+description = "Post-capture audio demux, signals, and waveform peaks for Capture sessions"
 keywords.workspace = true
 categories.workspace = true
 

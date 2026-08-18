@@ -201,3 +201,130 @@ fn idle_remove_refuses_a_session_with_no_evidence() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn emit_media_prints_committed_paths_by_session_id() {
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let parent = std::env::temp_dir().join(format!("rf-cli-emit-{n}"));
+    let mut store = SessionStore::create(
+        &parent,
+        SessionMeta {
+            id: SessionId::new("ses_emit"),
+            name: "emit".into(),
+            spec: CaptureSpec::screen(),
+            started_unix: None,
+            duration: None,
+        },
+    )
+    .expect("create session");
+    // Loose file a Host glob of sessions/<id>/ would pick up.
+    std::fs::write(store.root().join("segments/000099.mkv"), b"tail").unwrap();
+    store
+        .commit_segment(SegmentRecord {
+            id: SegmentId(1),
+            path: "segments/000001.mkv".into(),
+            start: MediaTime::from_secs(0.0, HZ_1K).expect("time"),
+            end: MediaTime::from_secs(5.0, HZ_1K).expect("time"),
+        })
+        .expect("commit");
+    std::fs::write(store.root().join("segments/000001.mkv"), b"seg").unwrap();
+
+    let parent_s = parent.to_string_lossy().into_owned();
+    let listed = run(&["emit-media", "--session", "ses_emit", "--dir", &parent_s]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let text = stdout(&listed);
+    assert!(text.contains("000001.mkv"), "{text}");
+    assert!(!text.contains("000099"), "{text}");
+    let line = text.lines().next().expect("one path");
+    assert!(
+        Path::new(line).is_absolute(),
+        "Host --video needs an absolute path: {line}"
+    );
+
+    let json = run(&[
+        "emit-media",
+        "--session",
+        "ses_emit",
+        "--dir",
+        &parent_s,
+        "--json",
+    ]);
+    assert!(json.status.success());
+    let body = stdout(&json);
+    assert!(body.contains("\"role\": \"video\""), "{body}");
+    assert!(body.contains("\"ticks\": 5000"), "{body}");
+    assert!(!body.contains("000099"), "{body}");
+
+    let _ = std::fs::remove_dir_all(parent);
+}
+
+#[test]
+fn clocks_prints_sidecar_and_skips_repair_when_asked() {
+    use reelforge_capture_store::{ClockMaster, ClockSegment};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let parent = std::env::temp_dir().join(format!("rf-cli-clk-{n}"));
+    let mut store = SessionStore::create(
+        &parent,
+        SessionMeta {
+            id: SessionId::new("ses_clk"),
+            name: "clk".into(),
+            spec: CaptureSpec::screen(),
+            started_unix: None,
+            duration: None,
+        },
+    )
+    .expect("create session");
+    store
+        .commit_segment(SegmentRecord {
+            id: SegmentId(1),
+            path: "segments/000001.mkv".into(),
+            start: MediaTime::from_secs(0.0, HZ_1K).expect("time"),
+            end: MediaTime::from_secs(5.0, HZ_1K).expect("time"),
+        })
+        .expect("commit");
+    store
+        .append_clock(ClockSegment {
+            id: SegmentId(1),
+            start: MediaTime::from_secs(0.0, HZ_1K).expect("time"),
+            end: MediaTime::from_secs(5.0, HZ_1K).expect("time"),
+            master: ClockMaster::Video,
+            session_secs: 5.2,
+            video_secs: Some(5.0),
+            audio_secs: Some(4.94),
+            video_start_secs: None,
+            audio: Vec::new(),
+            correction_ms: -200,
+        })
+        .expect("clocks");
+
+    let parent_s = parent.to_string_lossy().into_owned();
+    let out = run(&[
+        "clocks",
+        "--session",
+        "ses_clk",
+        "--dir",
+        &parent_s,
+        "--no-repair",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&out);
+    assert!(text.contains("video"), "{text}");
+    assert!(text.contains("corr=-200ms"), "{text}");
+    assert!(text.contains("session=5.200"), "{text}");
+
+    let _ = std::fs::remove_dir_all(parent);
+}

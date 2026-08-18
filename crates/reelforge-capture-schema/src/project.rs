@@ -243,6 +243,8 @@ mod tests {
             },
             retiming: crate::model::Retiming::Identity,
             transition_in: None,
+            crop: None,
+            scale_to: None,
             metadata: Metadata::default(),
         })
     }

@@ -348,7 +348,7 @@ fn fill(mut track: SignalTrack, raw: &str, key: &str, floor: Option<f64>) -> Opt
     track.is_measured().then_some(track)
 }
 
-fn ffmpeg_program() -> String {
+pub(crate) fn ffmpeg_program() -> String {
     std::env::var("REELFORGE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
 }
 

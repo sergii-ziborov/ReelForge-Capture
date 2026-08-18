@@ -165,6 +165,19 @@ pub struct NestedSequence {
     pub duration: Option<MediaTime>,
 }
 
+/// Pixel crop inside the source frame (`rf.transform.crop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CropRect {
+    /// Left.
+    pub x: u32,
+    /// Top.
+    pub y: u32,
+    /// Width.
+    pub w: u32,
+    /// Height.
+    pub h: u32,
+}
+
 /// One clip on a track.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineClip {
@@ -180,6 +193,12 @@ pub struct TimelineClip {
     /// Optional incoming transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition_in: Option<Transition>,
+    /// Crop applied after trim (click-zoom).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<CropRect>,
+    /// Scale the crop back to this size (usually the sequence canvas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_to: Option<(u32, u32)>,
     /// Clip metadata.
     #[serde(default)]
     pub metadata: Metadata,
@@ -213,6 +232,8 @@ mod tests {
             },
             retiming: Retiming::Speed { factor: 2.0 },
             transition_in: None,
+            crop: None,
+            scale_to: None,
             metadata: Metadata::default(),
         });
         let text = serde_json::to_string(&item).unwrap();

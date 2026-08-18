@@ -72,6 +72,20 @@ pub enum PointerEvent {
         /// Host / ffmpeg detail.
         detail: String,
     },
+    /// Keyboard key went down.
+    Key {
+        /// Session time.
+        t: MediaTime,
+    },
+    /// Foreground window changed.
+    Window {
+        /// Session time.
+        t: MediaTime,
+        /// OS window handle (stable across title changes of the same window).
+        hwnd: u64,
+        /// Title at the moment of the change.
+        title: String,
+    },
 }
 
 impl PointerEvent {
@@ -84,7 +98,9 @@ impl PointerEvent {
             | Self::FrameGap { t, .. }
             | Self::AudioGap { t, .. }
             | Self::DiskFull { t }
-            | Self::DeviceLost { t, .. } => t,
+            | Self::DeviceLost { t, .. }
+            | Self::Key { t }
+            | Self::Window { t, .. } => t,
         }
     }
 
@@ -96,14 +112,25 @@ impl PointerEvent {
             Self::FrameGap { .. }
             | Self::AudioGap { .. }
             | Self::DiskFull { .. }
-            | Self::DeviceLost { .. } => None,
+            | Self::DeviceLost { .. }
+            | Self::Key { .. }
+            | Self::Window { .. } => None,
         }
     }
 
-    /// Cursor or click (usable as idle / zoom evidence).
+    /// Cursor or click (usable as zoom evidence).
     #[must_use]
     pub const fn is_pointer(&self) -> bool {
         matches!(self, Self::Cursor { .. } | Self::Click { .. })
+    }
+
+    /// Input that votes in idle detection (pointer, key, foreground window).
+    #[must_use]
+    pub const fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Self::Cursor { .. } | Self::Click { .. } | Self::Key { .. } | Self::Window { .. }
+        )
     }
 
     /// Whether this is a click.

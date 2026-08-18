@@ -252,6 +252,7 @@ dependencies = [
  "reelforge-capture-platform",
  "reelforge-capture-project",
  "reelforge-capture-runtime",
+ "reelforge-capture-schema",
  "reelforge-capture-store",
  "serde_json",
 ]
@@ -280,6 +281,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "reelforge-capture-core",
+ "serde_json",
  "windows-sys",
 ]
 
@@ -289,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "reelforge-capture-core",
  "reelforge-capture-edit",
+ "reelforge-capture-platform",
  "reelforge-capture-schema",
  "reelforge-capture-store",
 ]
@@ -300,6 +303,8 @@ dependencies = [
  "reelforge-capture-core",
  "reelforge-capture-platform",
  "reelforge-capture-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

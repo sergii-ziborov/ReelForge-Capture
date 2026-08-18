@@ -55,6 +55,13 @@ fn golden_project() -> CaptureProject {
             },
             retiming: Retiming::Identity,
             transition_in: None,
+            crop: Some(reelforge_capture_schema::CropRect {
+                x: 80,
+                y: 45,
+                w: 160,
+                h: 90,
+            }),
+            scale_to: Some((320, 180)),
             metadata: Metadata::default(),
         }),
         TimelineItem::Clip(TimelineClip {
@@ -69,6 +76,8 @@ fn golden_project() -> CaptureProject {
                 kind: TransitionKind::Dissolve,
                 duration: t(0.25),
             }),
+            crop: None,
+            scale_to: None,
             metadata: Metadata::from_tags([("origin", "speed_op")]),
         }),
         TimelineItem::Gap(Gap { duration: t(0.5) }),
@@ -88,6 +97,8 @@ fn golden_project() -> CaptureProject {
         },
         retiming: Retiming::Identity,
         transition_in: None,
+        crop: None,
+        scale_to: None,
         metadata: Metadata::from_tags([("audio_leg", "system"), ("gap_ms", "12")]),
     })];
 

@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 reelforge-capture-core = { workspace = true }
 reelforge-capture-edit = { workspace = true }
+reelforge-capture-platform = { workspace = true }
 reelforge-capture-schema = { workspace = true }
 reelforge-capture-store = { workspace = true }
 

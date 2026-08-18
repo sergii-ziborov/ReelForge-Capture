@@ -1,8 +1,14 @@
 //! Crash-safe session directory: manifest + WAL + closed segments + event log.
 
 mod audio;
+mod clocks;
+mod control;
+mod waveform;
 
 pub use audio::{AUDIO_SIDECAR_VERSION, AudioLegTrack, AudioSegmentFile, AudioSidecar};
+pub use clocks::{CLOCK_SIDECAR_VERSION, ClockAudioLeg, ClockMaster, ClockSegment, ClockSidecar};
+pub use control::ControlOp;
+pub use waveform::{WAVEFORM_SIDECAR_VERSION, WaveformLeg, WaveformPeak, WaveformSidecar};
 
 use reelforge_capture_core::{
     CaptureError, CaptureSpec, HZ_1K, MediaTime, PointerEvent, Result, SegmentId, SessionId,

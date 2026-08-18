@@ -26,8 +26,9 @@
 //!
 //! 1. Change the types here and re-bless the golden document
 //!    (`REELFORGE_BLESS=1 cargo test -p reelforge-capture-schema`).
-//! 2. Copy the golden document into `ReelForge` and assert
-//!    `CaptureProject::from_json` accepts it unchanged.
+//! 2. Copy the same file to
+//!    `ReelForge/crates/reelforge-project/tests/golden/capture_project_v1.json`
+//!    and run `cargo test -p reelforge-project --test conformance`.
 //! 3. Bump [`CAPTURE_PROJECT_VERSION`] on both sides in the same release.
 //!
 //! A silent drift now fails a test instead of a customer render.
@@ -38,7 +39,7 @@ mod project;
 
 pub use ids::{MediaRefId, ProjectId, SequenceId, TimelineClipId, TimelineTrackId};
 pub use model::{
-    Gap, Marker, MediaRef, Metadata, NestedSequence, Retiming, SemanticRef, SourceRange,
+    CropRect, Gap, Marker, MediaRef, Metadata, NestedSequence, Retiming, SemanticRef, SourceRange,
     TimelineClip, TimelineItem, Transition, TransitionKind,
 };
 pub use project::{CAPTURE_PROJECT_VERSION, CaptureProject, Sequence, TimelineTrack, TrackKind};

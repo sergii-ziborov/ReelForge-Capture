@@ -10,8 +10,10 @@
 mod io;
 
 use clap::{Parser, Subcommand};
-use io::{click_zoom_path, load_edits, parse_video, save_edits, spec_name};
-use reelforge_capture_analyze::{SignalOptions, materialize_audio, session_signals};
+use io::{click_zoom_path, load_edits, parse_video, resolve_session, save_edits, spec_name};
+use reelforge_capture_analyze::{
+    SignalOptions, WaveformOptions, materialize_audio, session_signals, session_waveforms,
+};
 use reelforge_capture_core::{
     AudioDevice, AudioMix, CaptureError, CaptureSpec, HZ_1K, MediaTime, Result, SessionId,
     SessionMeta,
@@ -20,9 +22,11 @@ use reelforge_capture_edit::{
     EditDecision, IdleConfig, apply_ranges, detect_idle_multi, zoom_from_clicks,
 };
 use reelforge_capture_platform::{grab_command, list_audio_hint, list_windows};
-use reelforge_capture_project::{project_from_session, to_json_pretty, unresolved_audio};
-use reelforge_capture_runtime::{SessionPhase, SessionSupervisor};
-use reelforge_capture_store::SessionStore;
+use reelforge_capture_project::{
+    ingest_audio_media, ingest_video_media, project_from_session, to_json_pretty, unresolved_audio,
+};
+use reelforge_capture_runtime::{LiveStatus, SessionPhase, SessionSupervisor, repair_clocks};
+use reelforge_capture_store::{ControlOp, SessionStore};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,6 +93,14 @@ enum Cmd {
         /// Session directory.
         session: PathBuf,
     },
+    /// Write min/max audio peaks to `waveforms.json` (no extra ffmpeg at UI time).
+    Waveform {
+        /// Session directory.
+        session: PathBuf,
+        /// Bucket width in seconds.
+        #[arg(long, default_value_t = 0.05)]
+        bucket_secs: f64,
+    },
     /// Detect idle ranges from pointer + frame difference + audio energy.
     Idle {
         /// Session directory.
@@ -136,6 +148,60 @@ enum Cmd {
         /// Do not demux audio legs first (audio tracks stay muted / flagged).
         #[arg(long)]
         no_audio_extract: bool,
+    },
+    /// Print committed media paths Host feeds to `ingest_video`.
+    ///
+    /// One absolute path per line (video segments, record order). Does not
+    /// glob `sessions/<id>/` — only WAL-committed files are listed. Duration
+    /// lives on the same entries in the project JSON (`media[].duration`).
+    EmitMedia {
+        /// Session id (`ses_1`) or an existing session directory.
+        #[arg(long)]
+        session: String,
+        /// Parent directory used when `--session` is an id.
+        #[arg(long, default_value = "sessions")]
+        dir: PathBuf,
+        /// Include demuxed audio files after the video list.
+        #[arg(long)]
+        all: bool,
+        /// Print the `MediaRef` array (uri + duration + role) instead of paths.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print (and backfill) per-segment session / video / audio clocks.
+    Clocks {
+        /// Session id (`ses_1`) or an existing session directory.
+        #[arg(long)]
+        session: String,
+        /// Parent directory used when `--session` is an id.
+        #[arg(long, default_value = "sessions")]
+        dir: PathBuf,
+        /// Dump `clocks.json` instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Do not probe committed segments that have no row yet.
+        #[arg(long)]
+        no_repair: bool,
+    },
+    /// Ask a live `--run` supervisor to stop (writes `control.json`).
+    Stop {
+        /// Session directory.
+        session: PathBuf,
+    },
+    /// Ask a live supervisor to pause.
+    Pause {
+        /// Session directory.
+        session: PathBuf,
+    },
+    /// Ask a paused supervisor to resume.
+    Resume {
+        /// Session directory.
+        session: PathBuf,
+    },
+    /// Print `status.json` from a live (or just-stopped) session.
+    Status {
+        /// Session directory.
+        session: PathBuf,
     },
 }
 
@@ -201,6 +267,10 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Cmd::Edit { session, op } => edit(&session, op),
         Cmd::Audio { session } => audio(&session),
+        Cmd::Waveform {
+            session,
+            bucket_secs,
+        } => waveform(&session, bucket_secs),
         Cmd::Idle {
             session,
             threshold,
@@ -235,6 +305,22 @@ fn run(cli: Cli) -> Result<()> {
             output,
             no_audio_extract,
         } => emit_project(&session, &output, !no_audio_extract),
+        Cmd::EmitMedia {
+            session,
+            dir,
+            all,
+            json,
+        } => emit_media(&session, &dir, all, json),
+        Cmd::Clocks {
+            session,
+            dir,
+            json,
+            no_repair,
+        } => emit_clocks(&session, &dir, json, !no_repair),
+        Cmd::Stop { session } => control(&session, ControlOp::Stop),
+        Cmd::Pause { session } => control(&session, ControlOp::Pause),
+        Cmd::Resume { session } => control(&session, ControlOp::Resume),
+        Cmd::Status { session } => print_status(&session),
     }
 }
 
@@ -398,6 +484,37 @@ fn audio(session: &Path) -> Result<()> {
     Ok(())
 }
 
+fn waveform(session: &Path, bucket_secs: f64) -> Result<()> {
+    if !(bucket_secs.is_finite() && bucket_secs > 0.0) {
+        return Err(CaptureError::message("--bucket-secs must be > 0"));
+    }
+    let store = SessionStore::open(session)?;
+    if !store.manifest().meta.spec.audio.has_any() {
+        println!("no audio legs configured for this session");
+        return Ok(());
+    }
+    let done = session_waveforms(
+        &store,
+        &WaveformOptions {
+            bucket_secs,
+            ..WaveformOptions::default()
+        },
+    )?;
+    let peaks: usize = done.sidecar.legs.iter().map(|l| l.peaks.len()).sum();
+    println!(
+        "{} leg(s), {peaks} peak(s) → {}",
+        done.measured,
+        store.waveform_path().display()
+    );
+    for leg in &done.sidecar.legs {
+        println!("{}\t{} bucket(s)", leg.leg.as_str(), leg.peaks.len());
+    }
+    for f in &done.failures {
+        eprintln!("warning: {f}");
+    }
+    Ok(())
+}
+
 fn idle(session: &Path, remove: bool, config: IdleConfig, signals: SignalOptions) -> Result<()> {
     let store = SessionStore::open(session)?;
     let events = store.load_events()?;
@@ -448,7 +565,7 @@ fn zoom(session: &Path, duration: f64, scale: f64) -> Result<()> {
     let path = click_zoom_path(session);
     fs::write(&path, serde_json::to_string_pretty(&zooms)?)?;
     println!(
-        "{} click-zoom marker(s) → {} (markers only; not crop/scale keyframes)",
+        "{} click-zoom window(s) → {} (project emits crop+scale; markers kept)",
         zooms.len(),
         path.display()
     );
@@ -488,6 +605,113 @@ fn emit_project(session: &Path, output: &Path, extract_audio: bool) -> Result<()
             leg.as_str(),
             session.display()
         );
+    }
+    Ok(())
+}
+
+fn emit_media(session: &str, dir: &Path, all: bool, as_json: bool) -> Result<()> {
+    let root = resolve_session(session, dir)?;
+    let store = SessionStore::open(&root)?;
+    let mut media = ingest_video_media(&store)?;
+    if all {
+        media.extend(ingest_audio_media(&store)?);
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&media)?);
+        return Ok(());
+    }
+    for m in media {
+        println!("{}", m.uri);
+    }
+    Ok(())
+}
+
+fn emit_clocks(session: &str, dir: &Path, as_json: bool, repair: bool) -> Result<()> {
+    let root = resolve_session(session, dir)?;
+    let store = SessionStore::open(&root)?;
+    if repair {
+        let added = repair_clocks(&store)?;
+        if added > 0 {
+            eprintln!(
+                "repaired {added} clock row(s) → {}",
+                store.clocks_path().display()
+            );
+        }
+    }
+    let side = store.read_clocks()?.unwrap_or_default();
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&side)?);
+        return Ok(());
+    }
+    if side.segments.is_empty() {
+        println!("(no clocks — run a supervised capture, or drop --no-repair)");
+        return Ok(());
+    }
+    for row in &side.segments {
+        let video = row
+            .video_secs
+            .map_or_else(|| "-".into(), |s| format!("{s:.3}"));
+        let audio = row
+            .audio
+            .iter()
+            .map(|a| {
+                let d = a
+                    .duration_secs
+                    .map_or_else(|| "-".into(), |s| format!("{s:.3}"));
+                match a.start_secs {
+                    Some(st) if st > 0.0 => format!("a{}={d}@{st:.3}", a.index),
+                    _ => format!("a{}={d}", a.index),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let audio = if audio.is_empty() { "-".into() } else { audio };
+        println!(
+            "{}\t{}\tsession={:.3}\tvideo={video}\t{audio}\tcorr={}ms",
+            row.id.file_stem(),
+            row.master.as_str(),
+            row.session_secs,
+            row.correction_ms
+        );
+    }
+    Ok(())
+}
+
+fn control(session: &Path, op: ControlOp) -> Result<()> {
+    let store = SessionStore::open(session)?;
+    store.write_control(op)?;
+    let label = match op {
+        ControlOp::Stop => "stop",
+        ControlOp::Pause => "pause",
+        ControlOp::Resume => "resume",
+    };
+    println!(
+        "queued {label} → {} (the --run supervisor applies it on the next tick)",
+        store.control_path().display()
+    );
+    Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn print_status(session: &Path) -> Result<()> {
+    let path = session.join("status.json");
+    if !path.is_file() {
+        return Err(CaptureError::message(format!(
+            "no status.json in {} (is a supervisor running?)",
+            session.display()
+        )));
+    }
+    let live: LiveStatus = serde_json::from_str(&fs::read_to_string(path)?)?;
+    println!(
+        "{:?}  segments={}  elapsed={:.3}s  closed={:.3}s{}",
+        live.phase,
+        live.committed_segments,
+        live.elapsed_ms as f64 / 1_000.0,
+        live.closed_duration_ms as f64 / 1_000.0,
+        live.pid.map_or(String::new(), |p| format!("  pid={p}"))
+    );
+    if let Some(err) = live.last_error {
+        eprintln!("{err}");
     }
     Ok(())
 }

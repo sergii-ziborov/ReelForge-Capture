@@ -86,10 +86,22 @@ pub fn detect_idle(
 
     let mut marks: Vec<(f64, i32, i32, bool)> = Vec::new();
     for e in events {
-        let Some((x, y)) = e.position() else {
-            continue;
-        };
-        marks.push((e.time().as_secs(), x, y, e.is_click()));
+        match e {
+            PointerEvent::Cursor { t, x, y } => marks.push((t.as_secs(), *x, *y, false)),
+            PointerEvent::Click { t, x, y, .. } => marks.push((t.as_secs(), *x, *y, true)),
+            PointerEvent::Key { t } => {
+                let (x, y) = marks.last().map_or((0, 0), |m| (m.1, m.2));
+                marks.push((t.as_secs(), x, y, true));
+            }
+            PointerEvent::Window { t, hwnd, .. } => {
+                let x = i32::try_from(*hwnd & 0x7FFF_FFFF).unwrap_or(0);
+                marks.push((t.as_secs(), x, 0, false));
+            }
+            PointerEvent::FrameGap { .. }
+            | PointerEvent::AudioGap { .. }
+            | PointerEvent::DiskFull { .. }
+            | PointerEvent::DeviceLost { .. } => {}
+        }
     }
     marks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -201,9 +213,9 @@ pub fn detect_idle_multi(
     let mut votes: Vec<Vec<Span>> = Vec::new();
     let mut sources: Vec<String> = Vec::new();
 
-    if events.iter().any(PointerEvent::is_pointer) {
+    if events.iter().any(PointerEvent::is_input) {
         votes.push(to_spans(&detect_idle(events, duration, config.threshold)?));
-        sources.push("pointer".into());
+        sources.push("input".into());
     }
     for track in tracks {
         if !track.is_measured() {
@@ -451,7 +463,7 @@ mod tests {
         assert_eq!(pointer_only.len(), 1, "pointer alone calls it idle");
 
         let report = detect_idle_multi(&ev, &[audio], t(5.0), cfg).unwrap();
-        assert_eq!(report.sources, ["pointer", "audio_level:audio:microphone"]);
+        assert_eq!(report.sources, ["input", "audio_level:audio:microphone"]);
         assert_eq!(report.ranges.len(), 1);
         assert!(
             report.ranges[0].end.as_secs() <= 1.5 + 1e-9,
@@ -490,10 +502,46 @@ mod tests {
     }
 
     #[test]
+    fn a_key_press_ends_the_still_run() {
+        let ev = vec![
+            cur(0.0, 1, 1),
+            PointerEvent::Key { t: t(2.0) },
+            cur(6.0, 1, 1),
+        ];
+        let idle = detect_idle(&ev, t(6.0), t(1.5)).unwrap();
+        assert_eq!(idle.len(), 2, "{idle:?}");
+        assert!((idle[0].end.as_secs() - 2.0).abs() < 1e-9);
+        assert!((idle[1].start.as_secs() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_foreground_window_change_breaks_idle() {
+        let ev = vec![
+            PointerEvent::Window {
+                t: t(0.0),
+                hwnd: 1,
+                title: "a".into(),
+            },
+            PointerEvent::Window {
+                t: t(1.0),
+                hwnd: 2,
+                title: "b".into(),
+            },
+            PointerEvent::Window {
+                t: t(2.0),
+                hwnd: 2,
+                title: "b".into(),
+            },
+        ];
+        let idle = detect_idle(&ev, t(2.0), t(1.5)).unwrap();
+        assert!(idle.is_empty(), "{idle:?}");
+    }
+
+    #[test]
     fn ranges_shorter_than_the_threshold_are_dropped() {
         let ev = vec![cur(0.0, 1, 1), cur(1.0, 1, 1)];
         let report = detect_idle_multi(&ev, &[], t(1.0), IdleConfig::new(t(5.0))).unwrap();
         assert!(report.ranges.is_empty());
-        assert_eq!(report.sources, ["pointer"]);
+        assert_eq!(report.sources, ["input"]);
     }
 }
