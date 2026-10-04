@@ -36,10 +36,9 @@ fn available_bytes_impl(path: &Path) -> Option<u64> {
         return None;
     }
     let s = unsafe { s.assume_init() };
-    #[allow(clippy::cast_possible_truncation)]
-    let avail = s.f_bavail as u64;
-    #[allow(clippy::cast_possible_truncation)]
-    let fr = s.f_frsize as u64;
+    // `fsblkcnt_t` / `f_frsize` are u32 on some Unix targets and u64 on others.
+    let avail = u64::try_from(s.f_bavail).unwrap_or(u64::MAX);
+    let fr = u64::try_from(s.f_frsize).unwrap_or(u64::MAX);
     Some(avail.saturating_mul(fr))
 }
 

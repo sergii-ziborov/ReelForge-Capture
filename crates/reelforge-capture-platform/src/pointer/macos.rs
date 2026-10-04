@@ -1,4 +1,4 @@
-//! macOS cursor / buttons / keys / front window (CoreGraphics, no AppKit).
+//! macOS cursor / buttons / keys / front window (`CoreGraphics`, no `AppKit`).
 
 use super::PointerSample;
 use super::decode::front_window;
@@ -159,7 +159,7 @@ fn cf_string(v: *const c_void) -> String {
     if ok == 0 {
         return String::new();
     }
-    let bytes = buf.map(|b| b.cast_unsigned());
+    let bytes = buf.map(i8::cast_unsigned);
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }

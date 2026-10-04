@@ -498,7 +498,8 @@ fn clips_for_ranges(
             };
             let playable = src.playable_end.min(src.end).min(end);
             if cursor < playable {
-                n += emit_video_span(
+                // `emit_video_span` returns the next absolute id, not a delta.
+                n = emit_video_span(
                     &mut items, src, cursor, playable, scale, k.speed, prefix, n, zooms,
                 );
                 cursor = playable;
@@ -1080,5 +1081,36 @@ mod tests {
                 .any(|c| c.crop.is_some_and(|b| b.w == 160 && b.h == 90))
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn assert_dense_video_ids(n_segs: u32) {
+        let segs: Vec<(u32, f64, f64)> = (1..=n_segs)
+            .map(|ord| {
+                let start = f64::from(ord - 1) * 5.0;
+                (ord, start, start + 5.0)
+            })
+            .collect();
+        let end = f64::from(n_segs) * 5.0;
+        let (root, store) = store_with(&format!("ses_dense_{n_segs}"), &segs, false);
+        let p = project_from_session(&store, &kept_all(0.0, end, 1.0), &[]).unwrap();
+        let ids: Vec<String> = p.active().unwrap().tracks[0]
+            .items
+            .iter()
+            .map(|item| match item {
+                TimelineItem::Clip(clip) => clip.id.as_str().to_string(),
+                TimelineItem::Gap(_) | TimelineItem::Nested(_) => {
+                    panic!("expected only video clips")
+                }
+            })
+            .collect();
+        let expected: Vec<String> = (0..n_segs).map(|i| format!("c{i}")).collect();
+        assert_eq!(ids, expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn video_clip_ids_stay_dense_past_the_old_overflow() {
+        assert_dense_video_ids(65);
+        assert_dense_video_ids(720);
     }
 }

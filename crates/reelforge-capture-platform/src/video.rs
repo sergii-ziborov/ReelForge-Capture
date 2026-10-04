@@ -3,12 +3,21 @@
 use crate::host::HostOs;
 use reelforge_capture_core::{CaptureSpec, Region, VideoSource};
 
-/// Append `-f <grabber> … -i <src>` (and a crop filter when needed).
-pub(crate) fn push_video(args: &mut Vec<String>, spec: &CaptureSpec, os: HostOs) {
+/// Append `-f <grabber> … -i <src>`.
+///
+/// A macOS region crop is returned for a later output `-filter:v`. Pushing it
+/// here would make ffmpeg treat the crop as an input option before the next `-i`.
+pub(crate) fn push_video(args: &mut Vec<String>, spec: &CaptureSpec, os: HostOs) -> Option<String> {
     match os {
-        HostOs::Windows => push_gdigrab(args, spec),
+        HostOs::Windows => {
+            push_gdigrab(args, spec);
+            None
+        }
         HostOs::Macos => push_avfoundation(args, spec),
-        HostOs::Linux => push_x11grab(args, spec),
+        HostOs::Linux => {
+            push_x11grab(args, spec);
+            None
+        }
     }
 }
 
@@ -40,7 +49,7 @@ fn region_gdi(region: &Region) -> Vec<String> {
     ]
 }
 
-fn push_avfoundation(args: &mut Vec<String>, spec: &CaptureSpec) {
+fn push_avfoundation(args: &mut Vec<String>, spec: &CaptureSpec) -> Option<String> {
     args.extend([
         "-f".into(),
         "avfoundation".into(),
@@ -51,8 +60,9 @@ fn push_avfoundation(args: &mut Vec<String>, spec: &CaptureSpec) {
         "-i".into(),
         avfoundation_video(spec),
     ]);
-    if let VideoSource::Region { region } = &spec.video {
-        args.extend(["-filter:v".into(), crop_filter(region)]);
+    match &spec.video {
+        VideoSource::Region { region } => Some(crop_filter(region)),
+        VideoSource::Screen | VideoSource::Window { .. } => None,
     }
 }
 
@@ -112,7 +122,7 @@ mod tests {
             region: Region::new(8, 16, 320, 180),
         };
         let mut args = Vec::new();
-        push_video(&mut args, &spec, HostOs::Linux);
+        assert!(push_video(&mut args, &spec, HostOs::Linux).is_none());
         assert!(args.iter().any(|a| a == "x11grab"));
         assert!(args.iter().any(|a| a.contains("+8,16")));
         assert!(args.iter().any(|a| a == "320x180"));
@@ -121,8 +131,23 @@ mod tests {
     #[test]
     fn mac_screen_uses_avfoundation() {
         let mut args = Vec::new();
-        push_video(&mut args, &CaptureSpec::screen(), HostOs::Macos);
+        assert!(push_video(&mut args, &CaptureSpec::screen(), HostOs::Macos).is_none());
         assert!(args.iter().any(|a| a == "avfoundation"));
         assert!(args.iter().any(|a| a == "-capture_cursor"));
+        assert!(!args.iter().any(|a| a == "-filter:v"));
+    }
+
+    #[test]
+    fn mac_region_crop_is_not_pushed_between_inputs() {
+        let mut spec = CaptureSpec::screen();
+        spec.video = VideoSource::Region {
+            region: Region::new(8, 16, 320, 180),
+        };
+        let mut args = Vec::new();
+        assert_eq!(
+            push_video(&mut args, &spec, HostOs::Macos).as_deref(),
+            Some("crop=320:180:8:16")
+        );
+        assert!(!args.iter().any(|a| a == "-filter:v"));
     }
 }

@@ -1,6 +1,6 @@
 //! Linux X11 collector via `dlopen("libX11.so.6")`.
 //!
-//! Wayland-only sessions (no XWayland, no `DISPLAY`) return `None`. The crate
+//! Wayland-only sessions (no `XWayland`, no `DISPLAY`) return `None`. The crate
 //! still links without libx11-dev.
 
 use super::PointerSample;
@@ -53,7 +53,7 @@ impl std::fmt::Debug for Collector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("X11Collector")
             .field("connected", &(!self.dpy.is_null()))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -120,7 +120,7 @@ impl Collector {
         unsafe {
             (api.query_keymap)(self.dpy, keys.as_mut_ptr());
         }
-        let keys = keys.map(|b| b.cast_unsigned());
+        let keys = keys.map(i8::cast_unsigned);
         let (window, title) = focus_window(api, self.dpy);
         Some(PointerSample {
             x: rx,

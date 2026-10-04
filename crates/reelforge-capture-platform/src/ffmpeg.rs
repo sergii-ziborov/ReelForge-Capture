@@ -48,9 +48,12 @@ pub fn grab_command_on(os: HostOs, spec: &CaptureSpec, session_dir: &Path) -> Re
         "-loglevel".into(),
         "error".into(),
     ];
-    push_video(&mut args, spec, os);
+    let video_filter = push_video(&mut args, spec, os);
     let audio = push_audio(&mut args, &spec.audio, os);
     push_audio_maps(&mut args, audio);
+    if let Some(filter) = video_filter {
+        args.extend(["-filter:v".into(), filter]);
+    }
     let pattern = session_dir
         .join("segments")
         .join("%06d.mkv")
@@ -63,6 +66,8 @@ pub fn grab_command_on(os: HostOs, spec: &CaptureSpec, session_dir: &Path) -> Re
         "ultrafast".into(),
         "-pix_fmt".into(),
         "yuv420p".into(),
+        "-force_key_frames".into(),
+        format!("expr:gte(t,n_forced*{})", spec.segment_secs),
         "-f".into(),
         "segment".into(),
         "-segment_time".into(),
@@ -148,6 +153,14 @@ mod tests {
         assert!(g.args.iter().any(|a| a == "gdigrab"));
         assert!(g.args.iter().any(|a| a == "desktop"));
         assert!(g.args.iter().any(|a| a == "segment"));
+        let kf = g
+            .args
+            .iter()
+            .position(|a| a == "-force_key_frames")
+            .expect("force_key_frames");
+        assert_eq!(g.args[kf + 1], "expr:gte(t,n_forced*5)");
+        let mux = g.args.iter().position(|a| a == "segment").unwrap();
+        assert!(kf < mux, "{:?}", g.args);
         assert!(
             g.args
                 .windows(2)
@@ -213,5 +226,39 @@ mod tests {
         assert!(g.args.iter().any(|a| a.contains("[asys]")));
         assert!(g.args.iter().any(|a| a.contains("[amic]")));
         assert!(!g.args.iter().any(|a| a.contains("amix")));
+    }
+
+    #[test]
+    fn macos_region_crop_follows_the_audio_input() {
+        let mut spec = CaptureSpec::screen();
+        spec.video = VideoSource::Region {
+            region: Region::new(8, 16, 320, 180),
+        };
+        spec.audio.microphone = Some(AudioDevice::named("Mic"));
+        let g = grab_command_on(HostOs::Macos, &spec, Path::new("s")).unwrap();
+        let inputs: Vec<usize> = g
+            .args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "-i")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(inputs.len(), 2, "{:?}", g.args);
+        let filter_at = g
+            .args
+            .iter()
+            .position(|a| a == "-filter:v")
+            .expect("-filter:v");
+        let video_i = inputs[0];
+        let audio_i = inputs[1];
+        assert!(filter_at > audio_i, "{:?}", g.args);
+        assert!(
+            !(video_i < filter_at && filter_at < audio_i),
+            "crop filter sits between inputs: {:?}",
+            g.args
+        );
+        assert_eq!(g.args[filter_at + 1], "crop=320:180:8:16");
+        let cv = g.args.iter().position(|a| a == "-c:v").unwrap();
+        assert!(filter_at < cv, "{:?}", g.args);
     }
 }
