@@ -37,9 +37,13 @@ fn available_bytes_impl(path: &Path) -> Option<u64> {
     }
     let s = unsafe { s.assume_init() };
     // `fsblkcnt_t` / `f_frsize` are u32 on some Unix targets and u64 on others.
-    let avail = u64::try_from(s.f_bavail).unwrap_or(u64::MAX);
-    let fr = u64::try_from(s.f_frsize).unwrap_or(u64::MAX);
-    Some(avail.saturating_mul(fr))
+    // A generic widen avoids `try_from` (identity on Linux, infallible on macOS).
+    Some(widen_u64(s.f_bavail).saturating_mul(widen_u64(s.f_frsize)))
+}
+
+#[cfg(unix)]
+fn widen_u64(value: impl Into<u64>) -> u64 {
+    value.into()
 }
 
 #[cfg(not(any(windows, unix)))]
