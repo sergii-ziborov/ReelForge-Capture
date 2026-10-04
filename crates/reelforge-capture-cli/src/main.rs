@@ -30,9 +30,9 @@ use reelforge_capture_store::{ControlOp, SessionStore};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(
@@ -53,9 +53,9 @@ enum Cmd {
         /// Parent directory for `sessions/<id>`.
         #[arg(long, default_value = "sessions")]
         dir: PathBuf,
-        /// Session id.
-        #[arg(long, default_value = "ses_1")]
-        id: String,
+        /// Session id. A unique `ses_<unix_ms>_<hex>` is used when omitted.
+        #[arg(long)]
+        id: Option<String>,
         /// Full desktop.
         #[arg(long)]
         screen: bool,
@@ -340,7 +340,7 @@ fn devices() -> Result<()> {
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn start(
     dir: PathBuf,
-    id: String,
+    id: Option<String>,
     screen: bool,
     window: Option<String>,
     region: Option<String>,
@@ -366,6 +366,7 @@ fn start(
         system: system_audio.map(AudioDevice::named),
         microphone: mic.map(AudioDevice::named),
     };
+    let id = id.unwrap_or_else(fresh_session_id);
     let meta = SessionMeta {
         id: SessionId::new(id),
         name: spec_name(&spec),
@@ -389,6 +390,18 @@ fn start(
     println!();
     println!("session {}", store.root().display());
     Ok(())
+}
+
+/// `ses_{unix_millis}` plus hex from a process-local counter and this counter's address.
+fn fresh_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let addr = std::ptr::from_ref(&COUNTER) as usize as u64;
+    let salt = (n.wrapping_shl(16) ^ addr) & 0xffff_ffff;
+    format!("ses_{}_{salt:08x}", now.as_millis())
 }
 
 fn run_supervised(dir: PathBuf, meta: SessionMeta, for_secs: Option<f64>) -> Result<()> {

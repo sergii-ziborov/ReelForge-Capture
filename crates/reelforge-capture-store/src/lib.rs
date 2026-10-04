@@ -80,12 +80,28 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create `root/<id>/` and write the first WAL + manifest.
     ///
+    /// The session directory is created exclusively. If `root/<id>` already
+    /// exists, this returns an error containing `already exists` and does not
+    /// modify anything inside it.
+    ///
     /// # Errors
     ///
-    /// I/O.
+    /// I/O, or the session directory already exists.
     pub fn create(root: impl AsRef<Path>, meta: SessionMeta) -> Result<Self> {
-        let dir = root.as_ref().join(meta.id.as_str());
-        fs::create_dir_all(dir.join("segments"))?;
+        let parent = root.as_ref();
+        let dir = parent.join(meta.id.as_str());
+        if dir.try_exists()? {
+            return Err(session_exists(&dir));
+        }
+        fs::create_dir_all(parent)?;
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(session_exists(&dir));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        fs::create_dir(dir.join("segments"))?;
         let store = Self {
             root: dir,
             manifest: SessionManifest {
@@ -300,15 +316,23 @@ impl SessionStore {
             }
             return Ok(());
         }
-        let f = File::open(&wal)?;
+        let lines = BufReader::new(File::open(&wal)?)
+            .lines()
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let last = lines.len().saturating_sub(1);
         let mut open: Option<WalOp> = None;
         let mut committed = Vec::new();
-        for line in BufReader::new(f).lines() {
-            let line = line?;
+        for (i, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str(&line)? {
+            // A crash can tear the final line. Only that tail is dropped.
+            let op = match serde_json::from_str::<WalOp>(line) {
+                Ok(op) => op,
+                Err(_) if i == last => continue,
+                Err(e) => return Err(e.into()),
+            };
+            match op {
                 WalOp::Open { meta } => {
                     open = Some(WalOp::Open { meta });
                     committed.clear();
@@ -346,5 +370,145 @@ impl SessionStore {
         fs::write(&tmp, lines.join("\n") + "\n")?;
         fs::rename(tmp, self.wal_path())?;
         Ok(())
+    }
+}
+
+fn session_exists(dir: &Path) -> CaptureError {
+    CaptureError::message(format!("session already exists: {}", dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionStore;
+    use crate::SegmentRecord;
+    use reelforge_capture_core::{
+        CaptureError, CaptureSpec, ClickButton, HZ_1K, MediaTime, PointerEvent, SegmentId,
+        SessionId, SessionMeta,
+    };
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_root() -> PathBuf {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rf-store-{n}"))
+    }
+
+    fn meta(id: &str) -> SessionMeta {
+        SessionMeta {
+            id: SessionId::new(id),
+            name: "t".into(),
+            spec: CaptureSpec::screen(),
+            started_unix: None,
+            duration: None,
+        }
+    }
+
+    fn read(path: &Path) -> Vec<u8> {
+        fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn create_refuses_an_existing_session_without_writing() {
+        let root = tmp_root();
+        let mut s = SessionStore::create(&root, meta("ses_a")).unwrap();
+        let end = MediaTime::from_secs(5.0, HZ_1K).unwrap();
+        s.commit_segment(SegmentRecord {
+            id: SegmentId::first(),
+            path: "segments/000001.mkv".into(),
+            start: MediaTime::zero(HZ_1K),
+            end,
+        })
+        .unwrap();
+        s.append_event(&PointerEvent::Click {
+            t: MediaTime::from_secs(0.2, HZ_1K).unwrap(),
+            x: 3,
+            y: 4,
+            button: ClickButton::Left,
+        })
+        .unwrap();
+        let segments_before = s.manifest().segments.clone();
+        let events_before = s.load_events().unwrap();
+        let session = s.root().to_path_buf();
+        drop(s);
+
+        let manifest = read(&session.join("manifest.json"));
+        let wal = read(&session.join("wal.jsonl"));
+        let events = read(&session.join("events.jsonl"));
+        let Err(err) = SessionStore::create(&root, meta("ses_a")) else {
+            panic!("second create must fail");
+        };
+        match err {
+            CaptureError::Message(m) => assert!(m.contains("already exists"), "{m}"),
+            other => panic!("expected message, got {other}"),
+        }
+        assert_eq!(manifest, read(&session.join("manifest.json")));
+        assert_eq!(wal, read(&session.join("wal.jsonl")));
+        assert_eq!(events, read(&session.join("events.jsonl")));
+
+        let opened = SessionStore::open(&session).unwrap();
+        assert_eq!(opened.manifest().segments, segments_before);
+        assert_eq!(opened.load_events().unwrap(), events_before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn truncated_wal_tail_is_dropped() {
+        let root = tmp_root();
+        let mut s = SessionStore::create(&root, meta("ses_wal")).unwrap();
+        let end = MediaTime::from_secs(5.0, HZ_1K).unwrap();
+        s.commit_segment(SegmentRecord {
+            id: SegmentId::first(),
+            path: "segments/000001.mkv".into(),
+            start: MediaTime::zero(HZ_1K),
+            end,
+        })
+        .unwrap();
+        let session = s.root().to_path_buf();
+        drop(s);
+
+        let mut wal = OpenOptions::new()
+            .append(true)
+            .open(session.join("wal.jsonl"))
+            .unwrap();
+        writeln!(wal, "{{").unwrap();
+        drop(wal);
+
+        let opened = SessionStore::open(&session).unwrap();
+        assert_eq!(opened.manifest().segments.len(), 1);
+        assert_eq!(opened.manifest().segments[0].end, end);
+        assert_eq!(opened.manifest().segments[0].path, "segments/000001.mkv");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_wal_line_before_the_tail_is_an_error() {
+        let root = tmp_root();
+        let mut s = SessionStore::create(&root, meta("ses_bad")).unwrap();
+        s.commit_segment(SegmentRecord {
+            id: SegmentId::first(),
+            path: "segments/000001.mkv".into(),
+            start: MediaTime::zero(HZ_1K),
+            end: MediaTime::from_secs(5.0, HZ_1K).unwrap(),
+        })
+        .unwrap();
+        let session = s.root().to_path_buf();
+        drop(s);
+
+        let wal = session.join("wal.jsonl");
+        let text = fs::read_to_string(&wal).unwrap();
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        assert!(lines.len() >= 2, "{text}");
+        lines.insert(lines.len() - 1, "{".into());
+        fs::write(&wal, lines.join("\n") + "\n").unwrap();
+        let Err(err) = SessionStore::open(&session) else {
+            panic!("a corrupt line before the tail must fail open");
+        };
+        assert!(err.to_string().contains("json"), "{err}");
+        let _ = fs::remove_dir_all(root);
     }
 }
